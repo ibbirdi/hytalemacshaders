@@ -66,11 +66,23 @@ def extract(executable):
         # Builds from before Hytale 0.7 (GLSL 330): the pack's edits target 0.7's shaders.
         raise ValueError("This Hytale build is older than the pack supports (0.7 or later). "
                          "Open the Hytale launcher, let it update the game, start it once, then install again")
-    first = min(offset for offset, _ in mains)
-    bases = (p - first for p in occurrences(data, version) if p >= first)
-    base = max(bases, key=lambda b: sum(data.startswith(version, b + o) for o, _ in mains), default=-1)
-    if base < 0 or sum(data.startswith(version, base + o) for o, _ in mains) < (len(mains) + 1) // 2:
-        raise ValueError(f"Could not locate the shader data in {executable}")
+    # The resource offsets are relative to a blob whose start is not recorded: every "#version" in
+    # the binary votes for the start that would put it at the beginning of one of the main shaders
+    # (directly or after a UTF-8 BOM), and the start most of them agree on wins.
+    def starts_shader(position):
+        return data.startswith(b"#version", position) or data.startswith(b"\xef\xbb\xbf#version", position)
+    offsets = sorted({offset for offset, _ in mains})
+    votes = Counter()
+    for found in occurrences(data, b"#version"):
+        for skip in (0, 3):
+            for offset in offsets:
+                if found - skip - offset >= 0:
+                    votes[found - skip - offset] += 1
+    base = max(votes, key=lambda candidate: (votes[candidate], -candidate), default=-1)
+    matched = sum(starts_shader(base + offset) for offset, _ in mains) if base >= 0 else 0
+    if matched < (len(mains) + 1) // 2:
+        raise ValueError(f"Could not locate the shader data in {executable} ({len(resources)} shader resources, "
+                         f"{data.count(version)} GLSL 410 sources, best start matches {matched} of {len(mains)} shaders)")
     result = {}
     for name, (offset, size) in resources.items():
         if size <= 0 or base + offset + size > len(data):
