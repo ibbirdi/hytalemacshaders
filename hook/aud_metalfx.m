@@ -36,6 +36,9 @@ static GLuint g_gl[AMF_TEX_COUNT];
 static simd_float4x4 g_worldToView, g_viewToClip;
 static double g_waitTotal;
 static int g_waitCount;
+// Pipelined: the scaler writes one output while OpenGL samples the other, finished one.
+static int g_shownOutput = AMF_TEX_OUTPUT, g_pendingOutput = -1;
+static uint64_t g_pendingValue;
 
 static const struct {
     MTLPixelFormat metal;
@@ -52,6 +55,7 @@ static const struct {
     [AMF_TEX_SPECULAR] = {MTLPixelFormatBGRA8Unorm, GL_RGBA8, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 'BGRA', 4},
     [AMF_TEX_NORMALS] = {MTLPixelFormatRGBA16Float, GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT, 'RGhA', 8},
     [AMF_TEX_ROUGHNESS] = {MTLPixelFormatR16Float, GL_R16F, GL_RED, GL_HALF_FLOAT, 'L00h', 2},
+    [AMF_TEX_OUTPUT_B] = {MTLPixelFormatRGBA16Float, GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT, 'RGhA', 8},
 };
 
 // The game runs from macOS 12; MetalFX exists from 13 (the framework is weak-linked).
@@ -110,11 +114,35 @@ const char *amf_backend(void)
 
 unsigned amf_texture(int which)
 {
+    if (which == AMF_TEX_OUTPUT) which = g_shownOutput;
     return which >= 0 && which < AMF_TEX_COUNT ? g_gl[which] : 0;
+}
+
+static int amf_wait(uint64_t value, uint64_t timeout)
+{
+    uint64_t start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    BOOL signalled = [g_event waitUntilSignaledValue:value timeoutMS:timeout];
+    g_waitTotal += (double)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start) / 1e6;
+    g_waitCount++;
+    if (!signalled) amf_log("metalfx: the GPU did not finish within %llu ms", (unsigned long long)timeout);
+    return signalled;
+}
+
+int amf_sync(void)
+{
+    if (g_pendingOutput < 0) return 1;
+    int output = g_pendingOutput;
+    g_pendingOutput = -1;
+    if (!amf_wait(g_pendingValue, 2000)) return 0;
+    g_shownOutput = output;
+    return 1;
 }
 
 static void amf_release(void)
 {
+    if (g_pendingOutput >= 0) [g_event waitUntilSignaledValue:g_pendingValue timeoutMS:2000];
+    g_pendingOutput = -1;
+    g_shownOutput = AMF_TEX_OUTPUT;
     if (g_residency && g_queue4) {
         if (@available(macOS 26.0, *)) [(id<MTL4CommandQueue>)g_queue4 removeResidencySet:g_residency];
     }
@@ -157,7 +185,7 @@ static int amf_image(int which, int width, int height, MTLTextureUsage usage)
     glBindTexture(GL_TEXTURE_RECTANGLE, g_gl[which]);
     CGLError error = CGLTexImageIOSurface2D(CGLGetCurrentContext(), GL_TEXTURE_RECTANGLE, g_formats[which].internal, width, height,
                                             g_formats[which].format, g_formats[which].type, g_surfaces[which], 0);
-    GLenum filter = which == AMF_TEX_OUTPUT ? GL_LINEAR : GL_NEAREST;
+    GLenum filter = which == AMF_TEX_OUTPUT || which == AMF_TEX_OUTPUT_B ? GL_LINEAR : GL_NEAREST;
     glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MIN_FILTER, filter);
     glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MAG_FILTER, filter);
     glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -222,6 +250,7 @@ static int amf_create(int renderWidth, int renderHeight, int outputWidth, int ou
                     usage[AMF_TEX_SPECULAR] = scaler.specularAlbedoTextureUsage;
                     usage[AMF_TEX_NORMALS] = scaler.normalTextureUsage;
                     usage[AMF_TEX_ROUGHNESS] = scaler.roughnessTextureUsage;
+                    usage[AMF_TEX_OUTPUT_B] = scaler.outputTextureUsage;
                 }
             }
         } else {
@@ -254,6 +283,7 @@ static int amf_create(int renderWidth, int renderHeight, int outputWidth, int ou
                 usage[AMF_TEX_MOTION] = scaler.motionTextureUsage;
                 usage[AMF_TEX_REACTIVE] = MTLTextureUsageShaderRead;
                 usage[AMF_TEX_OUTPUT] = scaler.outputTextureUsage;
+                usage[AMF_TEX_OUTPUT_B] = scaler.outputTextureUsage;
             }
         }
         if (!g_scaler) {
@@ -262,9 +292,10 @@ static int amf_create(int renderWidth, int renderHeight, int outputWidth, int ou
             glBindTexture(GL_TEXTURE_RECTANGLE, (GLuint)previous);
             return 0;
         }
-        int images = denoise ? AMF_TEX_COUNT : AMF_TEX_OUTPUT + 1, valid = 1;
-        for (int which = 0; which < images && valid; which++) {
-            int output = which == AMF_TEX_OUTPUT;
+        int valid = 1;
+        for (int which = 0; which < AMF_TEX_COUNT && valid; which++) {
+            if (!denoise && which > AMF_TEX_OUTPUT && which != AMF_TEX_OUTPUT_B) continue;   // guides
+            int output = which == AMF_TEX_OUTPUT || which == AMF_TEX_OUTPUT_B;
             valid = amf_image(which, output ? outputWidth : renderWidth, output ? outputHeight : renderHeight, usage[which]);
         }
         glBindTexture(GL_TEXTURE_RECTANGLE, (GLuint)previous);
@@ -283,7 +314,8 @@ static int amf_create(int renderWidth, int renderHeight, int outputWidth, int ou
                 MTLResidencySetDescriptor *descriptor = [MTLResidencySetDescriptor new];
                 descriptor.label = @"Aurora MetalFX images";
                 id<MTLResidencySet> residency = [g_device newResidencySetWithDescriptor:descriptor error:&error];
-                for (int which = 0; which < images; which++) [residency addAllocation:g_textures[which]];
+                for (int which = 0; which < AMF_TEX_COUNT; which++)
+                    if (g_textures[which]) [residency addAllocation:g_textures[which]];
                 [residency commit];
                 [(id<MTL4CommandQueue>)g_queue4 addResidencySet:residency];
                 g_residency = residency;
@@ -305,9 +337,13 @@ void amf_set_camera(const float *worldToView, const float *viewToClip)
     memcpy(&g_viewToClip, viewToClip, sizeof g_viewToClip);
 }
 
-int amf_evaluate(float jitterX, float jitterY, float motionScaleX, float motionScaleY, int reset)
+int amf_evaluate(float jitterX, float jitterY, float motionScaleX, float motionScaleY, int reset, int pipelined)
 {
-    if (!g_scaler) return 0;
+    if (!g_scaler || !amf_sync()) return 0;
+    // Pipelined, into the output OpenGL is not about to sample; the first frames after a
+    // configure (no finished output yet, and the scaler's GPU programs are built) wait.
+    pipelined = pipelined && g_framesSinceConfigure >= 4;
+    int output = pipelined ? (g_shownOutput == AMF_TEX_OUTPUT ? AMF_TEX_OUTPUT_B : AMF_TEX_OUTPUT) : g_shownOutput;
     @autoreleasepool {
         if (g_denoise) {
             if (@available(macOS 26.0, *)) {
@@ -320,7 +356,7 @@ int amf_evaluate(float jitterX, float jitterY, float motionScaleX, float motionS
                 scaler.specularAlbedoTexture = g_textures[AMF_TEX_SPECULAR];
                 scaler.normalTexture = g_textures[AMF_TEX_NORMALS];
                 scaler.roughnessTexture = g_textures[AMF_TEX_ROUGHNESS];
-                scaler.outputTexture = g_textures[AMF_TEX_OUTPUT];
+                scaler.outputTexture = g_textures[output];
                 scaler.jitterOffsetX = jitterX;
                 scaler.jitterOffsetY = jitterY;
                 scaler.motionVectorScaleX = motionScaleX;
@@ -336,7 +372,7 @@ int amf_evaluate(float jitterX, float jitterY, float motionScaleX, float motionS
             scaler.depthTexture = g_textures[AMF_TEX_DEPTH];
             scaler.motionTexture = g_textures[AMF_TEX_MOTION];
             if (@available(macOS 14.4, *)) scaler.reactiveMaskTexture = g_textures[AMF_TEX_REACTIVE];
-            scaler.outputTexture = g_textures[AMF_TEX_OUTPUT];
+            scaler.outputTexture = g_textures[output];
             scaler.inputContentWidth = g_renderWidth;
             scaler.inputContentHeight = g_renderHeight;
             scaler.jitterOffsetX = jitterX;
@@ -367,17 +403,18 @@ int amf_evaluate(float jitterX, float jitterY, float motionScaleX, float motionS
             [commandBuffer encodeSignalEvent:g_event value:value];
             [commandBuffer commit];
         }
+        // Waiting here on every frame let macOS lower the GPU clock to its lowest state after
+        // about 20 seconds of play (the GPU idles while the CPU waits, then the CPU while the GPU
+        // catches up): pipelined, the wait moves to the next frame's amf_sync, by when it is done.
+        if (pipelined) {
+            g_pendingOutput = output;
+            g_pendingValue = value;
+            g_framesSinceConfigure++;
+            return 1;
+        }
         // The first frames after a configure also build the scaler's GPU programs: a timeout
         // there is no reason to give up.
-        uint64_t timeout = g_framesSinceConfigure++ < 4 ? 30000 : 2000;
-        uint64_t start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-        BOOL signalled = [g_event waitUntilSignaledValue:value timeoutMS:timeout];
-        g_waitTotal += (double)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start) / 1e6;
-        g_waitCount++;
-        if (!signalled) {
-            amf_log("metalfx: the GPU did not finish within %llu ms", (unsigned long long)timeout);
-            return 0;
-        }
+        if (!amf_wait(value, g_framesSinceConfigure++ < 4 ? 30000 : 2000)) return 0;
     }
     return 1;
 }

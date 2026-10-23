@@ -266,6 +266,7 @@
 #define AU_METALFX 0                  // macOS: Apple MetalFX temporal upscaling instead of the TAA (hook/aud_metalfx.m)
 #define AU_METALFX_DENOISER 0         // macOS 26+: MetalFX's denoised scaler (its Ray Reconstruction)
 #define AU_METALFX_METAL4 1           // macOS 26+: submit MetalFX through Metal 4 (the original queue lets the GPU clock drop)
+#define AU_METALFX_PIPELINE 1        // macOS: show MetalFX's output one frame later instead of waiting for the GPU every frame
 #define AU_MAC_SETTINGS 2             // installer: macOS settings migrations applied (tools/linux_hook.py)
 #define AU_DLSS_PRESET 0              // hook: DLSS model, 0 NVIDIA's default, 1 sharpest (K / RR E), 2 less ghosting (J / RR D)
 #define AU_DLSS_RR_PRESET 0

@@ -1206,7 +1206,7 @@ static double g_setDlssSharpness = 0.2;
 static int g_setRenderScale, g_setDlssEnabled;
 static int g_setTAAJitter;          // AU_TAA && AU_TAA_JITTER: jitter for the pack's own TAA
 static double g_setUpscaleSharpness = 0.3;
-static int g_setMfxDenoise, g_setMfxMetal4;   // AU_METALFX_DENOISER, AU_METALFX_METAL4
+static int g_setMfxDenoise, g_setMfxMetal4, g_setMfxPipelined;   // AU_METALFX_DENOISER, AU_METALFX_METAL4, AU_METALFX_PIPELINE
 static int g_taaFrame = -100;       // last frame TemporalAAFS ran
 static int g_setFrameGen;
 static int g_setVoxelColors;
@@ -3056,6 +3056,11 @@ static void dlss_draw(GLenum mode, GLint first, GLsizei count)
     }
     r_glDrawArrays(mode, first, count);
     if (g_dlssOW <= 0 || vp[2] != g_dlssNativeW || vp[3] != g_dlssNativeH) return;
+    // MetalFX may still read the last frame's inputs (pipelined): it finishes before they change.
+    if (!amf_sync()) {
+        mfx_fail("MetalFX did not finish");
+        return;
+    }
     profile_use("MetalFX inputs");
     HookPassState state = hook_pass_begin(g_mfxFbo, vp[2], vp[3]);
     GLfloat bounds[4] = {0.0f, 0.0f, (GLfloat)vp[2], (GLfloat)vp[3]};
@@ -3105,7 +3110,8 @@ static int mfx_resolve(const GLint *viewport)
 }
 
 // The present: MetalFX runs on this frame's inputs and its output replaces Hytale's scale-to-window
-// draw. Returns 1 when it did.
+// draw; pipelined (AU_METALFX_PIPELINE), the output of the frame before, so the CPU never waits
+// for the GPU. Returns 1 when it did.
 static int dlss_present_rect(int x, int y, int w, int h, const char *how, int direct)
 {
     (void)direct;
@@ -3124,7 +3130,8 @@ static int dlss_present_rect(int x, int y, int w, int h, const char *how, int di
     g_jitterPx[0] = g_sceneJitter[0] * g_dlssW * 0.5f;
     g_jitterPx[1] = g_sceneJitter[1] * g_dlssH * 0.5f;
     if (!amf_evaluate(g_jitterPx[0] * (float)g_setJitterSX, g_jitterPx[1] * (float)g_setJitterSY,
-                      (float)g_setMotionSX, (float)g_setMotionSY, g_dlssReset > 0 || g_setDlssDebug == 2)) {
+                      (float)g_setMotionSX, (float)g_setMotionSY, g_dlssReset > 0 || g_setDlssDebug == 2,
+                      g_setMfxPipelined && g_setDlssDebug == 0)) {
         mfx_fail("MetalFX did not run");
         return 0;
     }
@@ -3716,6 +3723,7 @@ static void settings_load(void)
     g_setDlssEnabled = settings_num(txt, "AU_METALFX", 0) > 0.5;   // the upscaler on this platform
     g_setMfxDenoise = settings_num(txt, "AU_METALFX_DENOISER", 0) > 0.5;
     g_setMfxMetal4 = settings_num(txt, "AU_METALFX_METAL4", 1) > 0.5;
+    g_setMfxPipelined = settings_num(txt, "AU_METALFX_PIPELINE", 1) > 0.5;
 #else
     g_setDlssEnabled = settings_num(txt, "AU_DLSS", 0) > 0.5;
 #endif

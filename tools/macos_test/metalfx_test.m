@@ -23,6 +23,7 @@
 enum { RENDER = 96, OUTPUT = 144, FRAMES = 48 };
 
 static GLuint g_program, g_inputs, g_readback;
+static int g_pipelined;   // run() hands frames to the bridge as the hook does with AU_METALFX_PIPELINE
 static GLint g_edge, g_jitter, g_motion;
 
 static void log_line(const char *format, ...)
@@ -119,15 +120,19 @@ static Width run(float jitterSignX, float jitterSignY, float motionSignX, float 
         glUniform2f(g_jitter, jitterX, jitterY);
         // The hook's motion: where each pixel's surface was last frame, minus where it is.
         glUniform2f(g_motion, -speedX, -speedY);
+        if (!amf_sync()) { fprintf(stderr, "sync failed\n"); exit(1); }
         glDrawArrays(GL_TRIANGLES, 0, 3);
         glFlush();
-        if (!amf_evaluate(jitterX * jitterSignX, jitterY * jitterSignY, motionSignX, motionSignY, frame == 0)) {
+        if (!amf_evaluate(jitterX * jitterSignX, jitterY * jitterSignY, motionSignX, motionSignY, frame == 0, g_pipelined)) {
             fprintf(stderr, "evaluate failed\n");
             exit(1);
         }
     }
+    // Pipelined, the last frame's output is the one amf_sync finishes, in either output image.
+    if (!amf_sync()) { fprintf(stderr, "sync failed\n"); exit(1); }
     static float pixels[OUTPUT * OUTPUT * 4];
     glBindFramebuffer(GL_FRAMEBUFFER, g_readback);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, amf_texture(AMF_TEX_OUTPUT), 0);
     glReadPixels(0, 0, OUTPUT, OUTPUT, GL_RGBA, GL_FLOAT, pixels);
     Width width = {0.0, 0.0};
     for (int y = 0; y < OUTPUT; y++)
@@ -172,7 +177,7 @@ int main(void)
                 glDrawArrays(GL_TRIANGLES, 0, 3);
                 glFinish();
                 double start = CFAbsoluteTimeGetCurrent();
-                if (!amf_evaluate(0.25f, -0.25f, 1.0f, 1.0f, frame == 0 && round == 0)) return 1;
+                if (!amf_evaluate(0.25f, -0.25f, 1.0f, 1.0f, frame == 0 && round == 0, 0)) return 1;
                 total += CFAbsoluteTimeGetCurrent() - start;
             }
             printf("%s %s %dx%d: %.2f ms\n", benchDenoise ? "denoised" : "temporal", amf_backend(), benchWidth, benchHeight, total * 1000.0 / 30.0);
@@ -191,7 +196,12 @@ int main(void)
         Width panY = run(1, 1, 1, 1, 0, 1.37f), panYWrong = run(1, 1, 1, -1, 0, 1.37f);
         printf("%s %s: panning, edge width with the bridge's motion %.2f / %.2f px, opposite sign %.2f / %.2f px\n",
                name, amf_backend(), panX.x, panY.y, panXWrong.x, panYWrong.y);
-        int valid = right.x < wrong.x && right.y < wrong.y && panX.x <= panXWrong.x && panY.y <= panYWrong.y;
+        g_pipelined = 1;
+        Width pipelined = run(1, 1, 1, 1, 1.37f, 0);
+        g_pipelined = 0;
+        printf("%s %s: pipelined, panning edge width %.2f px (waiting every frame %.2f px)\n", name, amf_backend(), pipelined.x, panX.x);
+        int valid = right.x < wrong.x && right.y < wrong.y && panX.x <= panXWrong.x && panY.y <= panYWrong.y
+                    && fabs(pipelined.x - panX.x) < 0.5;
         printf("%s: %s\n", name, valid ? "PASS" : "FAIL (the bridge's jitter or motion convention is wrong)");
         failures += !valid;
     }
@@ -209,7 +219,7 @@ int main(void)
             glDrawArrays(GL_TRIANGLES, 0, 3);
             glFinish();
             double start = CFAbsoluteTimeGetCurrent();
-            amf_evaluate(0.25f, -0.25f, 1.0f, 1.0f, frame == 0);
+            amf_evaluate(0.25f, -0.25f, 1.0f, 1.0f, frame == 0, 0);
             if (frame >= 10) total += CFAbsoluteTimeGetCurrent() - start;
         }
         printf("%s %s: %dx%d -> 4112x2516 in %.2f ms per frame (GPU work and the wait)\n",

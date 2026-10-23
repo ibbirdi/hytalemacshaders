@@ -20,6 +20,7 @@ enum {
     AMF_TEX_SPECULAR,   // RGBA8 specular albedo
     AMF_TEX_NORMALS,    // RGBA16F world-space normal
     AMF_TEX_ROUGHNESS,  // R16F linear roughness
+    AMF_TEX_OUTPUT_B,   // the second output when pipelined (amf_texture(AMF_TEX_OUTPUT) names the finished one)
     AMF_TEX_COUNT
 };
 
@@ -41,10 +42,16 @@ int amf_configure(int renderWidth, int renderHeight, int outputWidth, int output
 // GL_TEXTURE_RECTANGLE name of a shared image (0 when it does not exist).
 unsigned amf_texture(int which);
 
-// Hands this frame's inputs (already written and flushed by OpenGL) to MetalFX and waits until
-// the output is written. jitter: the geometry's offset in render pixels; motionScale converts the
-// motion image into pixels; both in OpenGL's axes. reset after camera cuts.
-int amf_evaluate(float jitterX, float jitterY, float motionScaleX, float motionScaleY, int reset);
+// Hands this frame's inputs (already written and flushed by OpenGL) to MetalFX. jitter: the
+// geometry's offset in render pixels; motionScale converts the motion image into pixels; both in
+// OpenGL's axes. reset after camera cuts. Without pipelined it waits until the output is written.
+// Pipelined, it returns at once and AMF_TEX_OUTPUT stays the last frame's output (written before
+// amf_sync returned); the first frame after a configure waits all the same.
+int amf_evaluate(float jitterX, float jitterY, float motionScaleX, float motionScaleY, int reset, int pipelined);
+
+// Waits until MetalFX has finished the last frame handed to it, which then becomes AMF_TEX_OUTPUT.
+// Call before OpenGL writes new inputs: MetalFX reads them until then. Returns 0 on a timeout.
+int amf_sync(void);
 
 // World-to-view and view-to-clip matrices (column major, OpenGL conventions) for the denoiser.
 void amf_set_camera(const float *worldToView, const float *viewToClip);

@@ -72,9 +72,17 @@ temporal scaler (4.3 ms through Metal 4), 22 ms for the denoised one (14 ms from
 In game the original queue is the slower one: about 20 seconds after the game comes to the front,
 macOS lowers the GPU clock step by step to its lowest state while the GPU stays busy (P13 to P1,
 16 W to 2 W on an M5 Pro, 40 fps to 20), and it climbs back as soon as MetalFX is off or the game
-goes to the background. Through Metal 4 the clock stays at its top state (55-60 fps at 67
-percent), so **Submit through Metal 4** is on by default; systems before macOS 26 use the
-original queue. The installer turns it on once for earlier installations (`AU_MAC_SETTINGS`).
+goes to the background. Through Metal 4 the clock held longer (55-60 fps at 67 percent) but
+fell all the same after a few minutes. What sets it off is the wait: the CPU blocked until
+MetalFX finished every frame, so the GPU idled while the CPU caught up, and macOS read the frames
+as limited by the CPU. With MetalFX off the clock stayed at its top state for minutes.
+**Pipelined** (on by default) hands each frame to MetalFX without waiting and shows the output of
+the frame before, which is finished by then: the 3D image is one frame later (about 17 ms at 60
+fps), the UI is not. **Submit through Metal 4** is on by default too; systems before macOS 26 use
+the original queue. The installer turns it on once for earlier installations (`AU_MAC_SETTINGS`).
+
+`tools/macos_test/metalfx_test.sh` gives unsteady edge widths while the game uses the GPU at the
+same time; run it with the game closed.
 
 ## Performance on Apple Silicon
 
