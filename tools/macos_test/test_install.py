@@ -94,6 +94,10 @@ class MacSettingsTests(unittest.TestCase):
     DEFAULTS = "#define AU_TAA_JITTER 0\n#define AU_METALFX 0\n#define AU_RENDER_SCALE 0\n#define AU_RTX_GI_RAYS 8\n#define AU_DLSS 0\n"
 
     def test_mac_starting_point_applies_once(self):
+        with patch.object(linux_hook, "mac_tier", return_value="high"):
+            self._starting_point()
+
+    def _starting_point(self):
         fresh = linux_hook.merge_settings(self.DEFAULTS, "", mac=True)
         self.assertIn("AU_METALFX 1", fresh)
         self.assertIn("AU_RENDER_SCALE 67", fresh)
@@ -107,6 +111,18 @@ class MacSettingsTests(unittest.TestCase):
         self.assertIn("AU_RENDER_SCALE 85", kept)
         self.assertIn("AU_RTX_GI_RAYS 12", kept)
         self.assertIn("AU_DLSS 0", kept)
+
+    def test_chip_classes(self):
+        self.assertEqual(linux_hook.mac_tier("Apple M5 Pro"), "high")
+        self.assertEqual(linux_hook.mac_tier("Apple M4 Max"), "high")
+        self.assertEqual(linux_hook.mac_tier("Apple M1 Pro"), "medium")
+        self.assertEqual(linux_hook.mac_tier("Apple M4"), "medium")
+        self.assertEqual(linux_hook.mac_tier("Apple M2"), "low")
+        with patch.dict("os.environ", {"AURORA_MAC_TIER": "low"}):
+            self.assertEqual(linux_hook.mac_tier("Apple M5 Pro"), "low")
+        with patch.object(linux_hook, "mac_tier", return_value="medium"):
+            merged = linux_hook.merge_settings(self.DEFAULTS, "", mac=True)
+        self.assertIn("AU_RENDER_SCALE 58", merged)
 
     def test_linux_keeps_render_scale_off_without_dlss(self):
         merged = linux_hook.merge_settings(self.DEFAULTS, "#define AU_RENDER_SCALE 67\n", mac=False)

@@ -13,8 +13,10 @@ so saving a setting never touches signed files.
 
 The installer is the Linux one (`tools/linux_install.py`, `tools/linux_hook.py`) with macOS
 branches: paths inside the bundle, a Mach-O header check, `pgrep` instead of `/proc`, and the
-signing steps below. `install.sh` creates `build/venv` with Pillow, because Homebrew's Python
-refuses system-wide `pip` installs.
+signing steps below. `install.sh` creates `build/venv` with Pillow, because the system's Python
+refuses system-wide `pip` installs. `setup-macos.sh` wraps all of it in one command. The installer
+follows the patchline the launcher plays (`patchline.json`) and picks the starting settings from
+the chip (`mac_tier`: M4 Pro and later high, M1-M3 Pro / Max and M3 / M4 medium, M1 / M2 low).
 
 ## Signing
 
@@ -103,8 +105,8 @@ at 0. `SDL_GL_SwapWindow` now advances the counter.
 
 - Shader hot reload polls `programs/` and `include/` twice a second on a background thread
   instead of using inotify; a menu save reloads once.
-- The menu draws with Homebrew's cairo, linked weakly: without cairo the game still starts, and
-  only the menu is missing.
+- The menu draws with CoreGraphics and CoreText (`hook/mac_panel.h`) in place of cairo, so only
+  Apple's command line tools are needed. `tools/macos_test/menu_test.sh` renders it into a PNG.
 - Mac keyboards have no Home or Pause key. **fn+Left** sends Home and opens the menu, and
   **General → Shaders** does what Pause does elsewhere. Mouse editing uses Ctrl, as on Linux.
 

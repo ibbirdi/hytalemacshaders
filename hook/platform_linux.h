@@ -16,11 +16,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <dlfcn.h>
-#include <cairo/cairo.h>
 #ifdef __APPLE__
+#include <CoreGraphics/CoreGraphics.h>
+#include <CoreText/CoreText.h>
 #include <dirent.h>
 #define st_mtim st_mtimespec
 #else
+#include <cairo/cairo.h>
 #include <sys/inotify.h>
 #endif
 

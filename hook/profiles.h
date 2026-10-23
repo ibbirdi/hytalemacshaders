@@ -72,6 +72,23 @@ static void menu_profile_set(const char *name, double value)
         if (!strcmp(g_mo[index].define, name) && g_mo[index].present) g_mo[index].value = value;
 }
 
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+// GPU class of this Mac, as tools/linux_hook.py mac_tier: 2 for M4 Pro / Max, M5 and later, 1 for
+// the Pro and Max chips before them and M3 / M4, 0 for M1 / M2.
+static int apple_gpu_tier(void)
+{
+    char brand[128] = "";
+    size_t size = sizeof brand;
+    int generation = 0;
+    char variant[16] = "";
+    if (sysctlbyname("machdep.cpu.brand_string", brand, &size, NULL, 0) || sscanf(brand, "Apple M%d %15s", &generation, variant) < 1)
+        return 1;
+    if (generation >= 5 || (generation >= 4 && variant[0])) return 2;
+    return variant[0] || generation >= 3 ? 1 : 0;
+}
+#endif
+
 static void menu_profile_builtin(int selected)
 {
     static const struct {
@@ -138,14 +155,17 @@ static void menu_profile_builtin(int selected)
     menu_profile_set("AU_GTAO_QUALITY", tier >= 5 ? 3 : tier == 4 ? 2 : 1);
     menu_profile_set("AU_CLOUD_LIGHTING", tier >= 4);
 #ifdef __APPLE__
-    // Apple Silicon at Retina sizes: MetalFX renders the RTX profiles at two thirds of the window,
-    // the TAA jitters, the screen-space GI and light shafts run at half resolution, and the
+    // Apple Silicon at Retina sizes: MetalFX renders below the window size (less for the non-RTX
+    // profiles and on faster chips), the TAA jitters, the screen-space GI and light shafts run at half resolution, and the
     // per-pixel sample counts the temporal filters integrate anyway stay moderate. The denoised
     // scaler stays a manual choice: it costs several times the upscale at these sizes.
     menu_profile_set("AU_TAA_JITTER", 1);
     menu_profile_set("AU_HALF_RES_FX", 1);
-    menu_profile_set("AU_METALFX", rtx);
-    menu_profile_set("AU_RENDER_SCALE", rtx ? 67 : 100);
+    // Render size by GPU class: an M1 Pro runs the same profiles at 58 percent, an M1 at 50.
+    // (Values of the menu's Render resolution list.)
+    static const int renderScale[2][3] = {{58, 67, 77}, {50, 58, 67}};
+    menu_profile_set("AU_METALFX", 1);
+    menu_profile_set("AU_RENDER_SCALE", renderScale[rtx][apple_gpu_tier()]);
     menu_profile_set("AU_RTX_GI_RAYS", quality[tier].giRays < 4 ? quality[tier].giRays : 4);
     menu_profile_set("AU_LIGHTSHAFT_SAMPLES", quality[tier].shaftSamples < 16 ? quality[tier].shaftSamples : 16);
     menu_profile_set("AU_SHADOW_SAMPLES", quality[tier].shadowSamples < 16 ? quality[tier].shadowSamples : 16);

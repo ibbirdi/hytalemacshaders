@@ -4921,14 +4921,13 @@ static void menu_render(int screenWidth, int screenHeight)
     SetBkMode(dc, TRANSPARENT);
 #else
     if (!linux_panel_resize(width, height)) return;
-    cairo_identity_matrix(g_ovDC);
-    cairo_scale(g_ovDC, 2.0, 2.0);
+    linux_panel_begin();
     g_ovTexW = width * 2;
     g_ovTexH = height * 2;
     g_fText = (LinuxFont){17 * scale, 0};
     g_fBold = (LinuxFont){17 * scale, 1};
     g_fSmall = (LinuxFont){14 * scale, 0};
-    cairo_t *dc = g_ovDC;
+    PanelDC dc = g_ovDC;
 #endif
     menu_fill(dc, 0, 0, width, height, RGB(13, 20, 29));
     menu_fill(dc, 0, layout->title, layout->rail, height - layout->footer, RGB(10, 16, 24));
@@ -5144,7 +5143,7 @@ static void menu_render(int screenWidth, int screenHeight)
     SelectObject(dc, oldPen);
     GdiFlush();
 #else
-    cairo_surface_flush(g_ovBmp);
+    linux_panel_flush();
 #endif
     width = g_ovTexW;
     height = g_ovTexH;

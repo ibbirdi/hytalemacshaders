@@ -102,18 +102,55 @@ def atomic_copy(source, target):
         pending.unlink(missing_ok=True)
 
 
-# Apple Silicon starting point (hook/profiles.h, macOS block): MetalFX at two thirds of the window,
-# TAA jitter, half-resolution GI and light shafts, moderate sample counts. Applied once, to settings
-# from before these options existed, so later choices are kept.
-MAC_DEFAULTS = {"AU_TAA_JITTER": "1", "AU_HALF_RES_FX": "1", "AU_METALFX": "1", "AU_RENDER_SCALE": "67",
-                "AU_RTX_GI_RAYS": "4", "AU_LIGHTSHAFT_SAMPLES": "16", "AU_SHADOW_SAMPLES": "16", "AU_FAR_SHADOW_STEPS": "24"}
+# Apple Silicon starting points (hook/profiles.h, macOS block), by GPU class: MetalFX upscaling,
+# TAA jitter, half-resolution GI and light shafts, sample counts the temporal filters integrate
+# anyway. Applied once, to settings from before these options existed, so later choices are kept.
+MAC_COMMON = {"AU_TAA_JITTER": "1", "AU_HALF_RES_FX": "1", "AU_METALFX": "1"}
+MAC_TIERS = {
+    # M4 Pro / Max, M5 and later
+    "high": {"AU_RENDER_SCALE": "67", "AU_RTX_GI_RAYS": "4", "AU_LIGHTSHAFT_SAMPLES": "16",
+             "AU_SHADOW_SAMPLES": "16", "AU_FAR_SHADOW_STEPS": "24"},
+    # M1 / M2 / M3 Pro and Max, M3, M4
+    "medium": {"AU_RENDER_SCALE": "58", "AU_RTX_GI_RAYS": "4", "AU_LIGHTSHAFT_SAMPLES": "12",
+               "AU_SHADOW_SAMPLES": "12", "AU_FAR_SHADOW_STEPS": "16", "AU_CONTACT_SHADOW_STEPS": "12",
+               "AU_SSS_VOXEL": "0", "AU_CLOUD_LAYERS": "1"},
+    # M1, M2: the non-RTX preset (no screen-space GI)
+    "low": {"AU_RENDER_SCALE": "50", "AU_PRESET": "1", "AU_LIGHTSHAFT_SAMPLES": "8", "AU_SHADOW_SAMPLES": "8",
+            "AU_FAR_SHADOWS": "0", "AU_CONTACT_SHADOW_STEPS": "8", "AU_SSS_VOXEL": "0", "AU_CLOUD_LAYERS": "1",
+            "AU_PCSS": "0"},
+}
+
+
+def mac_tier(brand=None):
+    """GPU class of this Mac from its chip name ("Apple M1 Pro"); AURORA_MAC_TIER overrides it."""
+    chosen = os.environ.get("AURORA_MAC_TIER", "").strip().lower()
+    if chosen in MAC_TIERS:
+        return chosen
+    if brand is None:
+        try:
+            brand = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout
+        except OSError:
+            brand = ""
+    match = re.search(r"Apple M(\d+)(?:\s+(Pro|Max|Ultra))?", brand or "")
+    if not match:
+        return "medium"
+    generation, variant = int(match[1]), match[2]
+    if generation >= 5 or (generation >= 4 and variant):
+        return "high"
+    if variant or generation >= 3:
+        return "medium"
+    return "low"
+
+
+def mac_defaults(tier=None):
+    return {**MAC_COMMON, **MAC_TIERS[tier or mac_tier()]}
 
 
 def merge_settings(defaults, previous, dlss_supported=False, mac=MAC):
     scalar = r"(?m)^(#define\s+(AU_\w+)\s+)([-+]?\d+(?:\.\d+)?)(?=\s|$)"
     values = {match[1]: match[2] for match in re.findall(scalar, previous)}
     if mac and "AU_TAA_JITTER" not in values:
-        values.update(MAC_DEFAULTS)
+        values.update(mac_defaults())
     # Older Linux installers zeroed every DLSS option, including motion/jitter
     # multipliers. Detect that signature without overwriting individual user edits.
     legacy_motion = ("AU_DLSS_JITTER", "AU_DLSS_JITTER_SX", "AU_DLSS_JITTER_SY",

@@ -19,7 +19,14 @@ CLIENT_SUFFIX = Path("install/release/package/game/latest/Client")
 def candidates(home=None, data_home=None):
     home = home or Path.home()
     if linux_hook.MAC:
-        return [(home / "Library/Application Support/Hytale" / CLIENT_SUFFIX, "native")]
+        # The patchline the launcher plays (release or pre-release) first, then the other ones.
+        hytale = home / "Library/Application Support/Hytale"
+        try:
+            chosen = json.loads((hytale / "patchline.json").read_text()).get("patchline", "release")
+        except (OSError, ValueError, AttributeError):
+            chosen = "release"
+        patchlines = [chosen] + [name for name in ("release", "pre-release") if name != chosen]
+        return [(hytale / "install" / name / "package/game/latest/Client", "native") for name in patchlines]
     data_home = data_home or Path(os.environ.get("XDG_DATA_HOME", home / ".local/share"))
     return [
         (data_home / "Hytale" / CLIENT_SUFFIX, "native"),
@@ -38,6 +45,11 @@ def detect(client_dir=None, backend=None):
             raise ValueError(f"No native HytaleClient found in {client}")
         mode = "flatpak" if APP_ID in client.parts else "native"
         return client, backend or mode
+    if linux_hook.MAC:
+        # macOS follows the launcher's current patchline rather than the last installation.
+        found = next((client for client, _ in candidates() if is_client(client)), None)
+        if found:
+            return found, backend or "native"
     if CONFIG.is_file():
         saved = json.loads(CONFIG.read_text())
         client = Path(saved["client_dir"])
@@ -77,7 +89,8 @@ def build_proxy(force=False):
     build_env = os.environ.copy()
     build_env["AU_DLSS"] = "1" if dlss_supported else "0"
     previous_dlss = proxy.is_file() and linux_hook.DLSS_MARKER in proxy.read_bytes()
-    inputs = [ROOT / "hook/aud_dlss.c", ROOT / "build.sh", *(ROOT / "hook").glob("*.h"), ROOT / "hook/hook.c", ROOT / "hook/sdl_proxy.map"]
+    inputs = [ROOT / "hook/aud_dlss.c", ROOT / "build.sh", *(ROOT / "hook").glob("*.h"), *(ROOT / "hook").glob("*.m"),
+              ROOT / "hook/hook.c", ROOT / "hook/sdl_proxy.map"]
     if force or previous_dlss != dlss_supported or not proxy.is_file() or any(p.stat().st_mtime_ns > proxy.stat().st_mtime_ns for p in inputs):
         subprocess.run(["bash", str(ROOT / "build.sh")], check=True, env=build_env)
     return proxy

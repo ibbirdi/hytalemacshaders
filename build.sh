@@ -3,23 +3,23 @@
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 if [[ $(uname -s) == Darwin ]]; then
-    # Apple Silicon: an SDL3 proxy that re-exports the game's original library. Dependency: brew install cairo
+    # Apple Silicon: an SDL3 proxy that re-exports the game's original library. Only the Xcode
+    # command line tools are needed: the menu draws with CoreGraphics (hook/mac_panel.h).
     if ! xcode-select -p >/dev/null 2>&1; then echo 'Install the compiler first: xcode-select --install' >&2; exit 1; fi
-    if ! command -v pkg-config >/dev/null || ! pkg-config --exists cairo; then echo 'Install build dependencies: brew install cairo pkg-config' >&2; exit 1; fi
     mkdir -p "$root/build"
     stage=$(mktemp -d "$root/build/.aurora-build.XXXXXX")
     trap 'rm -rf -- "$stage"' EXIT
-    read -r -a cairo_cflags <<< "$(pkg-config --cflags cairo)"
     # Link-time placeholder for the original SDL3, as on Linux; no game code is bundled.
     cc -arch arm64 -mmacosx-version-min=12.0 -dynamiclib -x c /dev/null -install_name @loader_path/libSDL3.aurora-original.dylib -o "$stage/sdl-link.dylib"
     # MetalFX bridge (hook/aud_metalfx.m). The game supports macOS 12; MetalFX (13) is weak-linked.
     cc -arch arm64 -mmacosx-version-min=12.0 -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter \
         -c "$root/hook/aud_metalfx.m" -o "$stage/aud_metalfx.o"
     cc -arch arm64 -mmacosx-version-min=12.0 -std=gnu11 -O2 -dynamiclib -Wall -Wextra -Wno-unused-function -Wno-unused-parameter \
-        -Wno-missing-field-initializers -DAU_SDL_PROXY=1 -DAU_HAS_DLSS=0 -DAU_HAS_METALFX=1 "${cairo_cflags[@]}" \
-        -I"$(pkg-config --variable=includedir cairo)" "$root/hook/hook.c" "$stage/aud_metalfx.o" \
+        -Wno-missing-field-initializers -DAU_SDL_PROXY=1 -DAU_HAS_DLSS=0 -DAU_HAS_METALFX=1 \
+        "$root/hook/hook.c" "$stage/aud_metalfx.o" \
         -framework Foundation -framework Metal -weak_framework MetalFX -framework IOSurface -framework OpenGL \
-        -install_name @rpath/libSDL3.dylib -Wl,-reexport_library,"$stage/sdl-link.dylib" -L"$(pkg-config --variable=libdir cairo)" -Wl,-weak-lcairo \
+        -framework CoreGraphics -framework CoreText \
+        -install_name @rpath/libSDL3.dylib -Wl,-reexport_library,"$stage/sdl-link.dylib" \
         -o "$stage/libaurora-sdl.dylib"
     mv -f -- "$stage/libaurora-sdl.dylib" "$root/build/"
     echo "Built $root/build/libaurora-sdl.dylib"

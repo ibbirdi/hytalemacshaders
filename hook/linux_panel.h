@@ -1,5 +1,10 @@
-// Cairo replaces the Windows GDI panel; the OpenGL overlay and menu model are shared.
+// Cairo replaces the Windows GDI panel; the OpenGL overlay and menu model are shared. macOS draws
+// the same panel with CoreGraphics and CoreText instead (mac_panel.h), so it needs no Homebrew.
+#ifdef __APPLE__
+#include "mac_panel.h"
+#else
 typedef struct { double px; int bold; } LinuxFont;
+typedef cairo_t *PanelDC;
 static cairo_t *g_ovDC;
 static cairo_surface_t *g_ovBmp;
 static unsigned char *g_ovBits;
@@ -13,9 +18,6 @@ typedef unsigned COLORREF;
 
 static int linux_panel_resize(int w, int h)
 {
-#ifdef __APPLE__
-    if (!&cairo_create) return 0; // cairo is weak-linked from Homebrew: no cairo, no menu, game still runs
-#endif
     if (g_ovBmp && g_ovBits && g_ovW == w && g_ovH == h) return 1;
     if (g_ovDC) cairo_destroy(g_ovDC);
     if (g_ovBmp) cairo_surface_destroy(g_ovBmp);
@@ -32,18 +34,18 @@ static int linux_panel_resize(int w, int h)
     g_ovW = w; g_ovH = h;
     return 1;
 }
-static void linux_color(cairo_t *dc, unsigned c)
+static void linux_color(PanelDC dc, unsigned c)
 {
     cairo_set_source_rgb(dc, ((c >> 16) & 255) / 255.0, ((c >> 8) & 255) / 255.0, (c & 255) / 255.0);
 }
-static void menu_fill(cairo_t *dc, int x0, int y0, int x1, int y1, unsigned c)
+static void menu_fill(PanelDC dc, int x0, int y0, int x1, int y1, unsigned c)
 {
     cairo_surface_mark_dirty(g_ovBmp);
     linux_color(dc, c);
     cairo_rectangle(dc, x0, y0, x1 - x0, y1 - y0);
     cairo_fill(dc);
 }
-static void menu_text(cairo_t *dc, const wchar_t *s, int x0, int y0, int x1, int y1,
+static void menu_text(PanelDC dc, const wchar_t *s, int x0, int y0, int x1, int y1,
                       LinuxFont font, unsigned c, unsigned align)
 {
     char text[1024];
@@ -63,7 +65,7 @@ static void menu_text(cairo_t *dc, const wchar_t *s, int x0, int y0, int x1, int
     cairo_restore(dc);
 }
 
-static void menu_round(cairo_t *dc, int left, int top, int right, int bottom, int radius, unsigned color)
+static void menu_round(PanelDC dc, int left, int top, int right, int bottom, int radius, unsigned color)
 {
     double corner = fmin(radius * 0.5, fmin(right - left, bottom - top) * 0.5);
     linux_color(dc, color);
@@ -75,3 +77,16 @@ static void menu_round(cairo_t *dc, int left, int top, int right, int bottom, in
     cairo_close_path(dc);
     cairo_fill(dc);
 }
+
+// Menu coordinates on the supersampled surface, before drawing a frame; then hand it to OpenGL.
+static void linux_panel_begin(void)
+{
+    cairo_identity_matrix(g_ovDC);
+    cairo_scale(g_ovDC, 2.0, 2.0);
+}
+
+static void linux_panel_flush(void)
+{
+    cairo_surface_flush(g_ovBmp);
+}
+#endif

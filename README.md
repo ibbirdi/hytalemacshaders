@@ -1,3 +1,51 @@
+# Hytale Mac Shaders
+
+Aurora Shaders for Hytale on **Apple Silicon Macs** (M1 and later), tuned for macOS: Apple
+**MetalFX** upscaling (and its denoised scaler), half-resolution GI and light shafts, TAA
+jitter, and path tracing / voxel scattering without image load/store. Settings start from the
+chip it runs on: an M5 Pro renders at 67 percent of the window, an M1 Pro at 58 percent with
+lighter shadows, an M1 or M2 at 50 percent with the non-RTX preset.
+
+## Install in one command
+
+Close Hytale, open **Terminal** and paste:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ibbirdi/hytalemacshaders/main/setup-macos.sh | bash
+```
+
+Hytale must be installed through the official launcher and started once. The first run asks
+macOS to install Apple's command line tools (a window opens: click Install); nothing else is
+needed. Then start Hytale from the launcher as usual: **fn+Left** opens the shader menu, whose
+**Apple MetalFX** tab sets the render resolution. Keep Hytale's own Render Scale at 100 percent.
+
+- **After a Hytale update**, close the game and run the same command again.
+- **Uninstall** (restores Hypixel's signed game byte for byte):
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/ibbirdi/hytalemacshaders/main/setup-macos.sh | bash -s -- --uninstall
+  ```
+
+- **Choose the quality class** instead of the detected one (`high`, `medium` or `low`), on a fresh
+  install: `curl -fsSL .../setup-macos.sh | AURORA_MAC_TIER=medium bash`.
+
+Shaders run on your Mac only, so players with and without them play together normally.
+How it works and what was tested: [macOS notes](docs/macos.md).
+
+## Credits
+
+- **Original Pack:** [Complementary Shaders](https://www.complementary.dev/) by Complementary
+  Development. This is a Modified Pack under the Complementary License Agreement 1.7
+  ([LICENSE.txt](LICENSE.txt)), which applies to the whole repository.
+- **Aurora Shaders for Hytale** by Kristijan1001:
+  [Hytale-Aurora-Shaders](https://github.com/Kristijan1001/Hytale-Aurora-Shaders).
+- **macOS port** (SDL3 hook on Apple Silicon, signing) by Ameno (iAmeno9):
+  [pull request #28](https://github.com/Kristijan1001/Hytale-Aurora-Shaders/pull/28).
+- **Apple Silicon work** in this repository: MetalFX bridge, half-resolution effects, voxel atlas,
+  CoreGraphics menu, one-command installer.
+
+---
+
 
 <a href="https://buymeacoffee.com/kristijan1001" target="_blank"> <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" width="160" alt="Buy Me a Coffee"> </a>
 
@@ -100,12 +148,11 @@ has passed its build and bridge checks but has not yet been verified in gameplay
 ### macOS (Apple Silicon)
 
 The macOS build targets **Apple Silicon Macs** with the native client from the official
-launcher. It is the Linux SDL3 proxy, built for arm64. Install Apple's command line tools and
-two Homebrew packages, close Hytale, then run the installer from this folder:
+launcher. It is the Linux SDL3 proxy, built for arm64 (the one-command install above does all of
+this). From a checkout: install Apple's command line tools, close Hytale, then run the installer:
 
 ```bash
 xcode-select --install
-brew install cairo pkg-config
 ./install.sh
 ```
 
@@ -391,9 +438,8 @@ On Linux, `./build.sh` builds `build/libaurora-sdl.so` (automatic loading) and
 `python3` and `python3-pil`. Build on the target distribution rather than copying a shared
 library built against a newer glibc onto an older Ubuntu release.
 
-On macOS, `./build.sh` builds `build/libaurora-sdl.dylib` with Apple's compiler. It needs the
-Xcode command line tools and Homebrew's `cairo` and `pkg-config`. Cairo draws the menu and is
-linked weakly: if it is removed later, the game still starts, only without the menu.
+On macOS, `./build.sh` builds `build/libaurora-sdl.dylib` with Apple's compiler. It only needs
+the Xcode command line tools: the menu draws with CoreGraphics and CoreText.
 
 On Windows:
 
