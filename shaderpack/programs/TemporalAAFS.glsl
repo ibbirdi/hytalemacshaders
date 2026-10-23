@@ -55,13 +55,13 @@ void main()
 {
     vec2 uv = fragTexCoords;
     vec2 currentUV = uv;
-#if !AU_DLSS
+#if !AU_DLSS && !AU_METALFX
     currentUV += uHookSceneJitter * 0.5;
 #endif
     vec4 current = texture(uColorTexture, currentUV);
 
-#if AU_DLSS
-    // DLSS (fed by PostEffectFS) replaces the anti-aliasing: pass the frame through.
+#if AU_DLSS || AU_METALFX
+    // DLSS or MetalFX (fed by PostEffectFS) replaces the anti-aliasing: pass the frame through.
     if (uNeighborHoodCheck < -1000) current.r += texture(uPreviousColorTexture, uv).r + texture(uHookDepth, uv).r;   // keep the game's uniforms referenced
     outColor = current;
     return;

@@ -138,14 +138,13 @@ static void menu_profile_builtin(int selected)
     menu_profile_set("AU_GTAO_QUALITY", tier >= 5 ? 3 : tier == 4 ? 2 : 1);
     menu_profile_set("AU_CLOUD_LIGHTING", tier >= 4);
 #ifdef __APPLE__
-    // Apple Silicon at Retina sizes: MetalFX renders the RTX profiles at two thirds of the window
-    // (Ray Reconstruction's counterpart, the denoised scaler, from High), the TAA jitters, the
-    // screen-space GI and light shafts run at half resolution, and the per-pixel sample counts the
-    // temporal filters integrate anyway stay moderate.
+    // Apple Silicon at Retina sizes: MetalFX renders the RTX profiles at two thirds of the window,
+    // the TAA jitters, the screen-space GI and light shafts run at half resolution, and the
+    // per-pixel sample counts the temporal filters integrate anyway stay moderate. The denoised
+    // scaler stays a manual choice: it costs several times the upscale at these sizes.
     menu_profile_set("AU_TAA_JITTER", 1);
     menu_profile_set("AU_HALF_RES_FX", 1);
     menu_profile_set("AU_METALFX", rtx);
-    menu_profile_set("AU_METALFX_DENOISER", rtx && tier >= 3);
     menu_profile_set("AU_RENDER_SCALE", rtx ? 67 : 100);
     menu_profile_set("AU_RTX_GI_RAYS", quality[tier].giRays < 4 ? quality[tier].giRays : 4);
     menu_profile_set("AU_LIGHTSHAFT_SAMPLES", quality[tier].shaftSamples < 16 ? quality[tier].shaftSamples : 16);

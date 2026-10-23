@@ -401,6 +401,82 @@ static int check_half_draw(void)
     return valid;
 }
 
+#if AU_HAS_METALFX
+// The hook's MetalFX path on this GPU: dlss_draw (Hytale's PostEffectFS draw, then the hook's
+// into MetalFX's inputs) and dlss_present_rect (MetalFX, then the resolve onto the "window"). A
+// flat colour written as the input must come out of the resolve at the window's size.
+static int check_metalfx_present(int metal4)
+{
+    const char *vertex = "#version 410 core\nvoid main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));gl_Position=vec4(p*2.0-1.0,0.0,1.0);}";
+    const char *fragment = "#version 410 core\nuniform int uHookMfxPass;uniform int uHookDlssResolve;uniform vec4 uHookDlssViewport;"
+        "uniform sampler2DRect uHookMfxOutput;uniform float uHookDlssSharpness;\n"
+        "layout(location=0) out vec4 outColor;layout(location=1) out vec4 auMfxDepth;layout(location=2) out vec4 auMfxMotion;\n"
+        "void main(){if(uHookDlssResolve==1){vec2 uv=(gl_FragCoord.xy-uHookDlssViewport.xy)/uHookDlssViewport.zw;"
+        "outColor=vec4(texture(uHookMfxOutput,uv*vec2(textureSize(uHookMfxOutput))).rgb,1.0);return;}"
+        "if(uHookMfxPass>0){outColor=vec4(0.25,0.5,0.75,1.0);auMfxDepth=vec4(0.5);auMfxMotion=vec4(0.0);return;}"
+        "outColor=vec4(1.0,0.0,1.0,1.0);}";
+    GLuint (APIENTRY *createProgram)(void) = (void *)real_wglGetProcAddress("glCreateProgram");
+    void (APIENTRY *readPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *) = (void *)real_wglGetProcAddress("glReadPixels");
+    GLenum (APIENTRY *getError)(void) = (void *)real_wglGetProcAddress("glGetError");
+    resolve_helpers();   // every r_gl* entry point, as the hook's first glShaderSource does
+    if (!hook_gl_ready()) return 0;
+    GLuint program = createProgram();
+    const char *sources[2] = {vertex, fragment};
+    for (int stage = 0; stage < 2; stage++) {
+        GLuint shader = r_glCreateShader(stage ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER);
+        r_glShaderSource(shader, 1, &sources[stage], NULL); r_glCompileShader(shader);
+        r_glAttachShader(program, shader); r_glDeleteShader(shader);
+    }
+    r_glLinkProgram(program);
+    r_glUseProgram(program);
+    ProgRec *record = prog_rec(program, 1);
+    snprintf(record->pname, sizeof record->pname, "PostEffectFS");
+    record->linked = 1;
+    check_extras(program, record);
+    if (!record->usesDlss || record->locMfxPass < 0) { fprintf(stderr, "FAIL MetalFX: the hook does not see the PostEffectFS uniforms\n"); return 0; }
+    g_curProg = g_dlssProg = program;
+    g_setDlssEnabled = 1;
+    // Hytale's targets: the scene at 64x48, the window at 96x72.
+    GLuint textures[2], framebuffers[2];
+    hgl.GenTextures(2, textures);
+    hgl.GenFramebuffers(2, framebuffers);
+    for (int index = 0; index < 2; index++) {
+        r_glBindTexture(GL_TEXTURE_2D, textures[index]);
+        hgl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, index ? 96 : 64, index ? 72 : 48, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        hgl.BindFramebuffer(0x8D40, framebuffers[index]);
+        hgl.FramebufferTexture2D(0x8D40, 0x8CE0, GL_TEXTURE_2D, textures[index], 0);
+    }
+    r_glBindTexture(GL_TEXTURE_2D, 0);
+    g_presentW = 96;
+    g_presentH = 72;
+    g_setMfxMetal4 = metal4;   // a change reconfigures the scaler, as the menu does
+    int valid = 1;
+    for (int frame = 0; frame < 3 && valid; frame++) {
+        hgl.BindFramebuffer(0x8D40, framebuffers[0]);
+        hgl.Viewport(0, 0, 64, 48);
+        r_glUseProgram(program);
+        dlss_draw(0x0004 /*TRIANGLES*/, 0, 3);
+        hgl.BindFramebuffer(0x8D40, framebuffers[1]);
+        hgl.Viewport(0, 0, 96, 72);
+        valid = g_dlssPending && dlss_present_rect(0, 0, 96, 72, "the test's window", 0);
+    }
+    unsigned char pixel[4] = {0};
+    readPixels(50, 40, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    GLint framebuffer = -1;
+    r_glGetIntegerv(0x8CA6, &framebuffer);
+    valid = valid && g_dlssState == 1 && g_dlssW == 64 && g_dlssOW == 96 && framebuffer == (GLint)framebuffers[1]
+         && abs(pixel[0] - 64) <= 8 && abs(pixel[1] - 128) <= 8 && abs(pixel[2] - 191) <= 8 && getError() == 0;
+    if (!valid) fprintf(stderr, "FAIL MetalFX present: state %d, %dx%d -> %dx%d, pixel %d %d %d, framebuffer %d\n",
+                        g_dlssState, g_dlssW, g_dlssH, g_dlssOW, g_dlssOH, pixel[0], pixel[1], pixel[2], framebuffer);
+    else printf("MetalFX present: %dx%d -> %dx%d through the hook on %s\n", g_dlssW, g_dlssH, g_dlssOW, g_dlssOH, amf_backend());
+    hgl.BindFramebuffer(0x8D40, 0);
+    g_curProg = g_dlssProg = 0;
+    g_setDlssEnabled = 0;
+    g_dlssPending = 0;
+    return valid;
+}
+#endif
+
 int main(int argumentCount, char **arguments)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -468,6 +544,10 @@ int main(int argumentCount, char **arguments)
     GET_GL(glUniform1f);
     int tested = 0, failures = 0;
     failures += !check_half_draw(); tested++;
+#if AU_HAS_METALFX
+    failures += !check_metalfx_present(0); tested++;
+    failures += !check_metalfx_present(1); tested++;
+#endif
     for (int sunlight = 0; sunlight < 2; sunlight++)
     for (int preset = 1; preset <= 2; preset++)
     for (int method = 0; method < 3; method++)
@@ -695,6 +775,54 @@ int main(int argumentCount, char **arguments)
         text = override_number(text, "AU_DLSS", dlss ? "1" : "0");
         failures += !check_source(programs[program], text); tested++;
     }
+#if AU_HAS_METALFX
+    for (int lensFlare = 0; lensFlare < 2; lensFlare++)
+    for (int adaptive = 0; adaptive < 2; adaptive++)
+    for (int fxaa = 0; fxaa < 2; fxaa++) {
+        char *text = shader_source("PostEffectFS");
+        text = override_number(text, "AU_METALFX", "1");
+        text = override_number(text, "AU_LENSFLARE", lensFlare ? "1" : "0");
+        text = override_number(text, "AU_ADAPTIVE_EXPOSURE", adaptive ? "1" : "0");
+        Str flagged = {0};
+        str_cstr(&flagged, fxaa ? "#version 410 core\n#define USE_FXAA 1\n" : "#version 410 core\n#define USE_FXAA 0\n");
+        str_cstr(&flagged, strchr(text, '\n') + 1);
+        free(text);
+        char label[100]; snprintf(label, sizeof(label), "MetalFX PostEffectFS flare=%d adaptive=%d fxaa=%d", lensFlare, adaptive, fxaa);
+        failures += !check_source(label, flagged.p); tested++;
+    }
+    for (int taa = 0; taa < 2; taa++) {
+        char *text = shader_source("TemporalAAFS");
+        text = override_number(text, "AU_METALFX", "1");
+        text = override_number(text, "AU_TAA", taa ? "1" : "0");
+        failures += !check_source("MetalFX TemporalAAFS", text); tested++;
+    }
+    {
+        // Linked with its vertex shader, PostEffectFS keeps every uniform the hook drives.
+        GLuint (APIENTRY *createProgram)(void) = (void *)real_wglGetProcAddress("glCreateProgram");
+        GLuint program = createProgram();
+        const char *names[2] = {"ScreenVS", "PostEffectFS"};
+        int linkedStages = 0;
+        for (int stage = 0; stage < 2; stage++) {
+            char *source = shader_source(names[stage]);
+            if (stage) source = override_number(source, "AU_METALFX", "1");
+            source = driver_source(source);
+            GLuint shader = r_glCreateShader(stage ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER);
+            const GLchar *pointer = source;
+            r_glShaderSource(shader, 1, &pointer, NULL); r_glCompileShader(shader);
+            GLint compiled = 0; r_glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+            linkedStages += compiled != 0;
+            r_glAttachShader(program, shader); r_glDeleteShader(shader); free(source);
+        }
+        GLint linked = 0;
+        if (linkedStages == 2) { r_glLinkProgram(program); r_glGetProgramiv(program, GL_LINK_STATUS, &linked); }
+        const char *uniforms[] = {"uHookMfxPass", "uHookMfxOutput", "uHookDlssResolve", "uHookDlssViewport", "uHookGBuffer0", "uHookDepth"};
+        int valid = linked;
+        for (int index = 0; index < 6 && valid; index++)
+            if (r_glGetUniformLocation(program, uniforms[index]) < 0) { fprintf(stderr, "FAIL MetalFX PostEffectFS: %s inactive\n", uniforms[index]); valid = 0; }
+        if (!linked) fprintf(stderr, "FAIL MetalFX PostEffectFS did not link (%d stages compiled)\n", linkedStages);
+        failures += !valid; tested++;
+    }
+#endif
     for (int preset = 1; preset <= 2; preset++) { failures += !check_half_resolution_pair(preset); tested += 2; }
     for (int half = 0; half < 2; half++)
     for (int preset = 1; preset <= 2; preset++)

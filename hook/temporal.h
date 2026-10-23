@@ -213,10 +213,10 @@ static void temporal_prepare(ProgRec *program)
         }
         g_sceneJitter[0] = engineX + g_jitterNdc[0];
         g_sceneJitter[1] = engineY + g_jitterNdc[1];
-#if AU_HAS_DLSS
+#if AU_HAS_UPSCALER
         g_jitterPx[0] = g_sceneJitter[0] * g_dlssW * 0.5f;
         g_jitterPx[1] = g_sceneJitter[1] * g_dlssH * 0.5f;
-        aud_set_camera(scene + 32, scene + 48);
+        upscaler_set_camera(scene + 32, scene + 48);
         if (!g_temporalValid) g_dlssReset = 2;
 #endif
         g_temporalHavePrevious = 1;

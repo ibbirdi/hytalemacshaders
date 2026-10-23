@@ -222,6 +222,13 @@ AU_TAA_BLEND | TAA history weight | range 0.0 0.97 0.01 | 0.93 | Previous-frame 
 AU_TAA_CLIP | TAA history clipping | range 0.5 2.0 0.05 | 1.25 | TAA history-clipping tolerance. Lower values reject mismatched history more aggressively.
 AU_TAA_JITTER | Sub-pixel jitter | bool | 0 | Shifts the camera by a fraction of a pixel every frame so the TAA resolves edges as well as noise (no upscaler needed). Turn off if edges shimmer.
 AU_UPSCALE_SHARPNESS | Upscale sharpness | range 0.0 1.0 0.05 | 0.3 | Used while Hytale's Render Scale is below 100 percent: the frame is scaled into the window with a bicubic filter and this much sharpening.
+?apple @ Apple MetalFX
+?apple AU_METALFX | MetalFX upscaling | bool | 0 | Apple's temporal upscaler in place of the TAA: the scene renders at the resolution below and MetalFX rebuilds the full window from several frames. Keep Hytale Render Scale at 100 percent.
+?apple AU_RENDER_SCALE | Render resolution (live) | enum 0:Native 100:100%_(anti-aliasing_only) 85:85% 77:77% 67:67%_Quality 58:58%_Balanced 50:50%_Performance | 0 | Changes the actual scene buffers without resizing the window. Requires MetalFX upscaling.
+?apple !DLSS_INFO | Active render size | info
+?apple AU_DLSS_SHARPNESS | MetalFX sharpness | range 0.0 1.0 0.05 | 0.2 | Edge-limited sharpening after MetalFX. Zero disables this pass.
+?apple AU_METALFX_DENOISER | Denoised scaler | bool | 0 | MetalFX's own ray reconstruction (macOS 26): it also denoises the lighting, guided by each surface's albedo, normal and roughness. Costs several times the plain upscaler at Retina sizes (about 14 ms at 50 percent of 4112x2516 on an M5 Pro).
+?apple AU_METALFX_METAL4 | Submit through Metal 4 | bool | 0 | MetalFX through Metal 4's command queue and scalers (macOS 26). Measured a little slower than the original queue on an M5 Pro; the image is the same.
 ?!apple @ NVIDIA DLSS
 ?!apple AU_DLSS | Super Resolution / DLAA | bool | 0
 ?!apple AU_RENDER_SCALE | Render resolution (live) | enum 0:Native 100:100%_DLAA 85:85%_Quality++ 77:77%_Quality+ 67:67%_Quality 58:58%_Balanced 50:50%_Performance 33:33%_Ultra_Performance | 0 | Changes the actual scene buffers without resizing the window. Quality+ and Quality++ use custom Aurora render ratios with NVIDIA's Quality mode. Keep Hytale Render Scale at 100 percent; enable DLSS to apply this setting.

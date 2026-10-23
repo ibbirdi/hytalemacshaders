@@ -100,7 +100,7 @@ static void linux_init(void)
     linux_sdl_keys = (const bool *(*)(int *))linux_real_dlsym(linux_sdl_handle, "SDL_GetKeyboardState");
     linux_sdl_focus = (void *(*)(void))linux_real_dlsym(linux_sdl_handle, "SDL_GetKeyboardFocus");
     linux_sdl_size = (bool (*)(void *, int *, int *))linux_real_dlsym(linux_sdl_handle, "SDL_GetWindowSizeInPixels");
-#if AU_HAS_DLSS
+#if AU_HAS_UPSCALER
     linux_push_event = (bool (*)(LinuxMenuEvent *))linux_real_dlsym(linux_sdl_handle, "SDL_PushEvent");
     linux_current_window = (void *(*)(void))linux_real_dlsym(linux_sdl_handle, "SDL_GL_GetCurrentWindow");
 #endif
@@ -159,13 +159,13 @@ static void linux_init(void)
         }
     }
 #endif
-    logf_("Aurora native Linux SDL3 hook loaded (%s); DLSS built=%d; dump=%d",
+    logf_("Aurora native SDL3 hook loaded (%s); DLSS built=%d; MetalFX built=%d; dump=%d",
 #if AU_SDL_PROXY
           "automatic proxy",
 #else
           "preload",
 #endif
-          AU_HAS_DLSS, g_dump);
+          AU_HAS_DLSS, AU_HAS_METALFX, g_dump);
 }
 
 #ifdef __APPLE__
@@ -336,7 +336,7 @@ __declspec(dllexport) bool SDL_GL_SwapWindow(void *window)
     g_postPresent = 0;
     linux_menu_init();
     lm_window = window;
-#if AU_HAS_DLSS
+#if AU_HAS_UPSCALER
     linux_render_scale_sync();
 #endif
     linux_menu_sync();

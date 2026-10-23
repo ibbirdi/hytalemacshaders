@@ -101,7 +101,7 @@ static float linux_menu_float(const LinuxMenuEvent *event, int offset)
 static bool linux_menu_filter(LinuxMenuEvent *event)
 {
     linux_menu_sync();
-#if AU_HAS_DLSS
+#if AU_HAS_UPSCALER
     linux_render_scale_event(event);
 #endif
     bool capture = lm_captured_window != NULL;
@@ -219,7 +219,7 @@ __declspec(dllexport) bool SDL_SetWindowMouseGrab(void *window, bool enabled)
 static void *linux_menu_lookup(const char *name)
 {
 #define LM_HOOK(fn) if (!strcmp(name, #fn)) return (void *)fn
-#if AU_HAS_DLSS
+#if AU_HAS_UPSCALER
     LM_HOOK(SDL_GetWindowSizeInPixels);
 #endif
     LM_HOOK(SDL_PollEvent); LM_HOOK(SDL_PeepEvents); LM_HOOK(SDL_GetKeyboardState);

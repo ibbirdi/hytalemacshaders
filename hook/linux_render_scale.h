@@ -1,6 +1,6 @@
 // SDL pixel sizes reported to Hytale describe its internal render resolution.
 // The overlay and DLSS output always use the original physical size query.
-#if AU_HAS_DLSS
+#if AU_HAS_UPSCALER
 static void *linux_render_window;
 static bool (*linux_push_event)(LinuxMenuEvent *);
 static void *(*linux_current_window)(void);

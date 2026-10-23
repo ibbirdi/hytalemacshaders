@@ -22,7 +22,11 @@
 #ifndef AU_HAS_DLSS
 #define AU_HAS_DLSS 0
 #endif
-static int g_dlssState; // 0 not tried, 1 ready, -1 unavailable
+#ifndef AU_HAS_METALFX
+#define AU_HAS_METALFX 0   // macOS: Apple MetalFX (hook/aud_metalfx.m) in DLSS's place
+#endif
+#define AU_HAS_UPSCALER (AU_HAS_DLSS || AU_HAS_METALFX)
+static int g_dlssState; // the upscaler (DLSS or MetalFX): 0 not tried, 1 ready, -1 unavailable
 
 #ifdef _WIN32
 #define AU_GL_EXPORT __declspec(dllexport)
@@ -334,6 +338,15 @@ static void expand(Str *out, const char *text, int depth)
                     str_cstr(out, name);
                     str_cstr(out, "\n");
                     expand(out, body, depth + 1);
+#if !AU_HAS_METALFX
+                    if (!strcmp(name, "AU_Settings.glsl")) str_cstr(out, "\n#undef AU_METALFX\n#define AU_METALFX 0\n");
+#else
+                    // MetalFX unavailable: the TAA again. No frame generation on macOS.
+                    if (!strcmp(name, "AU_Settings.glsl")) {
+                        str_cstr(out, "\n#undef AU_DLSS_FRAMEGEN\n#define AU_DLSS_FRAMEGEN 0\n");
+                        if (g_dlssState < 0) str_cstr(out, "#undef AU_METALFX\n#define AU_METALFX 0\n");
+                    }
+#endif
 #if !AU_HAS_DLSS
                     if (!strcmp(name, "AU_Settings.glsl"))
                         str_cstr(out, "\n#undef AU_DLSS\n#define AU_DLSS 0\n#undef AU_DLSS_RR\n#define AU_DLSS_RR 0\n");
@@ -530,6 +543,8 @@ typedef struct {
     GLint locEmissionReady;
     GLint locUpscale;        // uHookUpscale (BasicFS): set while it scales the finished frame to the window
     GLint locHalfPass;       // uHookHalfPass (DeferredFS with AU_HALF_RES_FX, see half_draw)
+    GLint locMfxPass;        // uHookMfxPass (PostEffectFS with AU_METALFX, see the MetalFX dlss_draw)
+    GLint locDlssResolve, locDlssViewport, locDlssSharpness;
     int shareGen, shareSrc;  // cached: is this program the source of a texture share
     int shareLocGen;         // g_shareGen the destination sampler locations below were looked up for
     GLint shareLoc[16];
@@ -1187,6 +1202,7 @@ static double g_setDlssSharpness = 0.2;
 static int g_setRenderScale, g_setDlssEnabled;
 static int g_setTAAJitter;          // AU_TAA && AU_TAA_JITTER: jitter for the pack's own TAA
 static double g_setUpscaleSharpness = 0.3;
+static int g_setMfxDenoise, g_setMfxMetal4;   // AU_METALFX_DENOISER, AU_METALFX_METAL4
 static int g_taaFrame = -100;       // last frame TemporalAAFS ran
 static int g_setFrameGen;
 static int g_setVoxelColors;
@@ -1194,8 +1210,8 @@ static int g_temporalFrame = -1, g_temporalValid;
 static float g_temporalScene[152], g_temporalPreviousScene[152];
 static void framegen_before_ui(ProgRec *program);
 static void framegen_after_scene(ProgRec *program);
-#if AU_HAS_DLSS
-static int g_dlssPresentedFrame = -100;   // last frame DLSS's output reached the window
+#if AU_HAS_UPSCALER
+static int g_dlssPresentedFrame = -100;   // last frame the upscaler's output reached the window
 #endif
 static int g_postPresent;                 // the frame is on the window: UI follows, no jitter
 
@@ -1715,6 +1731,7 @@ static void gi_draw(GLenum mode, GLint first, GLsizei count)
 
 #define HALF_UNIT_GI (HOOK_UNIT_BASE + 4)
 #define HALF_UNIT_VL (HOOK_UNIT_BASE + 5)
+#define MFX_UNIT_OUTPUT (HOOK_UNIT_BASE + 6)   // MetalFX's output (a rectangle texture) for the resolve
 static GLuint g_halfFbo, g_halfTex[2];
 static int g_halfW, g_halfH, g_halfFailed;
 
@@ -1735,6 +1752,9 @@ static struct {
     void (APIENTRY *DeleteTextures)(GLsizei, const GLuint *);
     void (APIENTRY *TexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
     void (APIENTRY *TexParameteri)(GLenum, GLenum, GLint);
+    void (APIENTRY *BindVertexArray)(GLuint);
+    void (APIENTRY *Flush)(void);
+    void (APIENTRY *BlitFramebuffer)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLuint, GLenum);
 } hgl;   // GL entry points of the hook's own offscreen passes
 
 static void *hook_gl_proc(const char *name)
@@ -1755,7 +1775,8 @@ static int hook_gl_ready(void)
     HGL(DrawBuffers, "glDrawBuffers") HGL(ClearBufferfv, "glClearBufferfv") HGL(Viewport, "glViewport")
     HGL(IsEnabled, "glIsEnabled") HGL(Enable, "glEnable") HGL(Disable, "glDisable") HGL(ColorMask, "glColorMask")
     HGL(GetBooleanv, "glGetBooleanv") HGL(GenTextures, "glGenTextures") HGL(DeleteTextures, "glDeleteTextures")
-    HGL(TexImage2D, "glTexImage2D") HGL(TexParameteri, "glTexParameteri")
+    HGL(TexImage2D, "glTexImage2D") HGL(TexParameteri, "glTexParameteri") HGL(BindVertexArray, "glBindVertexArray")
+    HGL(Flush, "glFlush") HGL(BlitFramebuffer, "glBlitFramebuffer")
 #undef HGL
     state = 1;
     return 1;
@@ -1764,7 +1785,7 @@ static int hook_gl_ready(void)
 // Hook passes draw with the game's program but without its blending, scissor or depth test, and
 // put back whatever they changed.
 typedef struct { GLint framebuffer, viewport[4]; GLboolean blend, scissor, depth, stencil, cull, mask[4]; } HookPassState;
-static HookPassState hook_pass_begin(GLuint framebuffer, int width, int height)
+static HookPassState hook_pass_begin_at(GLuint framebuffer, int x, int y, int width, int height)
 {
     HookPassState state;
     r_glGetIntegerv(0x8CA6 /*GL_DRAW_FRAMEBUFFER_BINDING*/, &state.framebuffer);
@@ -1775,8 +1796,13 @@ static HookPassState hook_pass_begin(GLuint framebuffer, int width, int height)
     hgl.GetBooleanv(0x0C23 /*COLOR_WRITEMASK*/, state.mask);
     hgl.ColorMask(1, 1, 1, 1);
     hgl.BindFramebuffer(0x8CA9 /*DRAW_FRAMEBUFFER*/, framebuffer);
-    hgl.Viewport(0, 0, width, height);
+    hgl.Viewport(x, y, width, height);
     return state;
+}
+
+static HookPassState hook_pass_begin(GLuint framebuffer, int width, int height)
+{
+    return hook_pass_begin_at(framebuffer, 0, 0, width, height);
 }
 
 static void hook_pass_end(const HookPassState *state)
@@ -1789,15 +1815,20 @@ static void hook_pass_end(const HookPassState *state)
     hgl.ColorMask(state->mask[0], state->mask[1], state->mask[2], state->mask[3]);
 }
 
-static void hook_bind_unit(GLuint unit, GLuint texture)
+static void hook_bind_unit_target(GLuint unit, GLenum target, GLuint texture)
 {
     r_glActiveTexture(GL_TEXTURE0 + unit);
-    r_glBindTexture(GL_TEXTURE_2D, texture);
+    r_glBindTexture(target, texture);
     if (r_glBindSampler) r_glBindSampler(unit, 0);
-    g_units[unit].target = GL_TEXTURE_2D;
+    g_units[unit].target = target;
     g_units[unit].tex = texture;
     g_units[unit].sampler = 0;
     r_glActiveTexture(GL_TEXTURE0 + g_activeUnit);
+}
+
+static void hook_bind_unit(GLuint unit, GLuint texture)
+{
+    hook_bind_unit_target(unit, GL_TEXTURE_2D, texture);
 }
 
 static void half_release(void)
@@ -2626,6 +2657,214 @@ static int dlss_present_rect(int x, int y, int w, int h, const char *how, int di
     return 1;
 }
 
+static void upscaler_set_camera(const float *worldToView, const float *viewToClip) { aud_set_camera(worldToView, viewToClip); }
+#elif AU_HAS_METALFX
+// ----------------------------------------------------------------------------------------
+// MetalFX (hook/aud_metalfx.m), the macOS counterpart of the DLSS path above. With AU_METALFX
+// the hook draws PostEffectFS a second time, into IOSurfaces it shares with Metal (uHookMfxPass
+// 1: the frame before exposure and tonemapping, its depth, the camera motion and the reactive
+// mask; 2 adds the denoised scaler's guides). At the present MetalFX upscales them and PostEffectFS's resolve mode
+// puts the result on the window in place of Hytale's scale-to-window draw. AU_RENDER_SCALE sets
+// the render size through the SDL pixel-size hook (linux_render_scale.h), as DLSS does on Linux.
+// The DLSS variable names stand for the upscaler here, so the shared code above works unchanged.
+
+#include "aud_metalfx.h"
+static int g_dlssW, g_dlssH, g_dlssReset, g_dlssNativeW, g_dlssNativeH;
+static int g_dlssOW, g_dlssOH, g_presentW, g_presentH;   // see the DLSS path
+static int g_mfxDenoise = -1, g_mfxMetal4 = -1;           // the configured scaler
+static GLuint g_mfxFbo, g_mfxReadFbo, g_mfxInputVAO;
+static GLenum g_mfxInputMode;
+static GLint g_mfxInputFirst;
+static GLsizei g_mfxInputCount;
+static int g_renderAppliedScale = 100;
+static int linux_physical_size(int *width, int *height);
+
+static int render_physical_size(int *width, int *height)
+{
+    return linux_physical_size(width, height);
+}
+
+static void upscaler_set_camera(const float *worldToView, const float *viewToClip) { amf_set_camera(worldToView, viewToClip); }
+
+static int dlss_ready(void)
+{
+    if (g_dlssState == 0) {
+        g_dlssState = hook_gl_ready() && amf_init(logf_) ? 1 : -1;
+        // Unavailable: the reload drops AU_METALFX from the shaders (expand), the TAA runs again.
+        if (g_dlssState < 0) InterlockedExchange(&g_reloadRequested, 1);
+        logf_("metalfx: %s", g_dlssState == 1 ? "ready" : "unavailable, the game scales as usual");
+    }
+    return g_dlssState == 1;
+}
+
+static void mfx_fail(const char *why)
+{
+    logf_("metalfx: %s; the TAA takes over", why);
+    g_dlssState = -1;
+    g_dlssOW = g_dlssOH = 0;
+    InterlockedExchange(&g_reloadRequested, 1);
+}
+
+// PostEffectFS's outputs 0-7 on MetalFX's input images (4-7, the guides, only for the denoiser).
+static int mfx_framebuffer(int denoise)
+{
+    static const int inputs[8] = {AMF_TEX_COLOR, AMF_TEX_DEPTH, AMF_TEX_MOTION, AMF_TEX_REACTIVE,
+                                  AMF_TEX_ALBEDO, AMF_TEX_SPECULAR, AMF_TEX_NORMALS, AMF_TEX_ROUGHNESS};
+    static const GLenum buffers[8] = {0x8CE0, 0x8CE1, 0x8CE2, 0x8CE3, 0x8CE4, 0x8CE5, 0x8CE6, 0x8CE7};   // COLOR_ATTACHMENT0-7
+    int count = denoise ? 8 : 4;
+    GLint previous = 0;
+    r_glGetIntegerv(0x8CA6 /*DRAW_FRAMEBUFFER_BINDING*/, &previous);
+    if (!g_mfxFbo) hgl.GenFramebuffers(1, &g_mfxFbo);
+    hgl.BindFramebuffer(0x8CA9 /*DRAW_FRAMEBUFFER*/, g_mfxFbo);
+    for (int index = 0; index < 8; index++)
+        hgl.FramebufferTexture2D(0x8CA9, buffers[index], 0x84F5 /*TEXTURE_RECTANGLE*/, index < count ? amf_texture(inputs[index]) : 0, 0);
+    hgl.DrawBuffers(count, buffers);
+    GLenum status = hgl.CheckFramebufferStatus(0x8CA9);
+    hgl.BindFramebuffer(0x8CA9, (GLuint)previous);
+    if (status != 0x8CD5 /*FRAMEBUFFER_COMPLETE*/) logf_("metalfx: input framebuffer incomplete (0x%x)", status);
+    return status == 0x8CD5;
+}
+
+// PostEffectFS: Hytale's draw as usual, then the hook's into MetalFX's inputs.
+static void dlss_draw(GLenum mode, GLint first, GLsizei count)
+{
+    ProgRec *program = prog_rec(g_curProg, 0);
+    if (!g_setDlssEnabled || !program || program->locMfxPass < 0 || !dlss_ready()) {
+        r_glDrawArrays(mode, first, count);
+        return;
+    }
+    GLint vp[4] = {0};
+    r_glGetIntegerv(GL_VIEWPORT, vp);
+    GLint drawFb = -1;
+    r_glGetIntegerv(0x8CA6 /*GL_DRAW_FRAMEBUFFER_BINDING*/, &drawFb);
+    // At Render Scale 100 PostEffectFS draws straight into the window: MetalFX runs right after.
+    int direct = drawFb == 0;
+    if (direct) {
+        g_presentW = vp[2];
+        g_presentH = vp[3];
+        render_physical_size(&g_presentW, &g_presentH);
+    }
+    int renderWidth = vp[2] < 32 ? 32 : vp[2], renderHeight = vp[3] < 32 ? 32 : vp[3];
+    int denoise = g_setMfxDenoise && amf_denoiser_available();
+    if (g_presentW > 0 && (renderWidth != g_dlssW || renderHeight != g_dlssH || vp[2] != g_dlssNativeW || vp[3] != g_dlssNativeH
+                           || g_presentW != g_dlssOW || g_presentH != g_dlssOH || denoise != g_mfxDenoise || g_setMfxMetal4 != g_mfxMetal4)) {
+        if (!amf_configure(renderWidth, renderHeight, g_presentW, g_presentH, denoise, g_setMfxMetal4) || !mfx_framebuffer(denoise)) {
+            mfx_fail("configuring the scaler failed");
+            r_glDrawArrays(mode, first, count);
+            return;
+        }
+        g_dlssW = renderWidth;
+        g_dlssH = renderHeight;
+        g_dlssNativeW = vp[2];
+        g_dlssNativeH = vp[3];
+        g_dlssOW = g_presentW;
+        g_dlssOH = g_presentH;
+        g_mfxDenoise = g_dlssRR = denoise;
+        g_mfxMetal4 = g_setMfxMetal4;
+        g_dlssReset = 2;
+    }
+    r_glDrawArrays(mode, first, count);
+    if (g_dlssOW <= 0 || vp[2] != g_dlssNativeW || vp[3] != g_dlssNativeH) return;
+    profile_use("MetalFX inputs");
+    HookPassState state = hook_pass_begin(g_mfxFbo, vp[2], vp[3]);
+    GLfloat bounds[4] = {0.0f, 0.0f, (GLfloat)vp[2], (GLfloat)vp[3]};
+    if (program->locDlssViewport >= 0) r_glUniform4fv(program->locDlssViewport, 1, bounds);
+    r_glUniform1i(program->locMfxPass, g_mfxDenoise ? 2 : 1);
+    r_glDrawArrays(mode, first, count);
+    r_glUniform1i(program->locMfxPass, 0);
+    hook_pass_end(&state);
+    GLint vertexArray = 0;
+    r_glGetIntegerv(0x85B5 /*VERTEX_ARRAY_BINDING*/, &vertexArray);
+    g_mfxInputVAO = (GLuint)vertexArray;
+    g_mfxInputMode = mode;
+    g_mfxInputFirst = first;
+    g_mfxInputCount = count;
+    g_dlssPending = 1;
+    if (direct) {
+        dlss_present_rect(vp[0], vp[1], vp[2], vp[3], "PostEffectFS (straight into the window)", 1);
+        g_dlssPending = 0;
+    }
+}
+
+// MetalFX's output onto the window through PostEffectFS's resolve mode (exposure, tonemapping,
+// lens flare, grading and vignette after the upscale; sharpening). Returns 0 when it cannot.
+static int mfx_resolve(const GLint *viewport)
+{
+    ProgRec *program = g_dlssProg ? prog_rec(g_dlssProg, 0) : NULL;
+    if (!program || program->locDlssResolve < 0 || !g_mfxInputVAO || g_mfxInputCount <= 0) return 0;
+    GLint previousProgram = 0, previousVAO = 0;
+    r_glGetIntegerv(GL_CURRENT_PROGRAM, &previousProgram);
+    r_glGetIntegerv(0x85B5 /*VERTEX_ARRAY_BINDING*/, &previousVAO);
+    GLint framebuffer = 0;
+    r_glGetIntegerv(0x8CA6 /*DRAW_FRAMEBUFFER_BINDING*/, &framebuffer);
+    HookPassState state = hook_pass_begin_at((GLuint)framebuffer, viewport[0], viewport[1], viewport[2], viewport[3]);
+    r_glUseProgram(g_dlssProg);
+    hook_bind_unit_target(MFX_UNIT_OUTPUT, 0x84F5 /*TEXTURE_RECTANGLE*/, amf_texture(AMF_TEX_OUTPUT));
+    GLfloat bounds[4] = {(GLfloat)viewport[0], (GLfloat)viewport[1], (GLfloat)viewport[2], (GLfloat)viewport[3]};
+    if (program->locDlssViewport >= 0) r_glUniform4fv(program->locDlssViewport, 1, bounds);
+    if (program->locDlssSharpness >= 0) r_glUniform1f(program->locDlssSharpness, (float)g_setDlssSharpness);
+    r_glUniform1i(program->locDlssResolve, 1);
+    hgl.BindVertexArray(g_mfxInputVAO);
+    r_glDrawArrays(g_mfxInputMode, g_mfxInputFirst, g_mfxInputCount);
+    r_glUniform1i(program->locDlssResolve, 0);
+    hgl.BindVertexArray((GLuint)previousVAO);
+    r_glUseProgram((GLuint)previousProgram);
+    hook_pass_end(&state);
+    return 1;
+}
+
+// The present: MetalFX runs on this frame's inputs and its output replaces Hytale's scale-to-window
+// draw. Returns 1 when it did.
+static int dlss_present_rect(int x, int y, int w, int h, const char *how, int direct)
+{
+    (void)direct;
+    if (render_physical_size(&w, &h)) x = y = 0;
+    g_dlssPending = 0;
+    g_postPresent = 1;
+    g_presentW = w;
+    g_presentH = h;
+    static char loggedHow[64];
+    if (strcmp(loggedHow, how)) {
+        snprintf(loggedHow, sizeof(loggedHow), "%s", how);
+        logf_("metalfx: frame presented by %s (%dx%d)", how, w, h);
+    }
+    if (g_dlssState != 1 || g_dlssOW != w || g_dlssOH != h) return 0;
+    hgl.Flush();   // Metal reads the inputs once OpenGL's commands are submitted
+    g_jitterPx[0] = g_sceneJitter[0] * g_dlssW * 0.5f;
+    g_jitterPx[1] = g_sceneJitter[1] * g_dlssH * 0.5f;
+    if (!amf_evaluate(g_jitterPx[0] * (float)g_setJitterSX, g_jitterPx[1] * (float)g_setJitterSY,
+                      (float)g_setMotionSX, (float)g_setMotionSY, g_dlssReset > 0 || g_setDlssDebug == 2)) {
+        mfx_fail("MetalFX did not run");
+        return 0;
+    }
+    if (g_dlssReset > 0) g_dlssReset--;
+    g_dlssPresentedFrame = g_frame;
+    GLint vp[4] = {x, y, w, h};
+    if (g_setDlssDebug == 0 || g_setDlssDebug == 2) {
+        if (mfx_resolve(vp)) return 1;
+    }
+    // Debug views (AU_DLSS_DEBUG 1 colour, 3 depth, 4 motion) and the fallback: a plain blit.
+    int input = g_setDlssDebug == 1 ? AMF_TEX_COLOR : g_setDlssDebug == 3 ? AMF_TEX_DEPTH : g_setDlssDebug == 4 ? AMF_TEX_MOTION : -1;
+    GLint readFb = 0;
+    r_glGetIntegerv(0x8CAA /*READ_FRAMEBUFFER_BINDING*/, &readFb);
+    if (!g_mfxReadFbo) hgl.GenFramebuffers(1, &g_mfxReadFbo);
+    hgl.BindFramebuffer(0x8CA8 /*READ_FRAMEBUFFER*/, g_mfxReadFbo);
+    hgl.FramebufferTexture2D(0x8CA8, 0x8CE0, 0x84F5 /*TEXTURE_RECTANGLE*/, amf_texture(input >= 0 ? input : AMF_TEX_OUTPUT), 0);
+    GLboolean scissor = hgl.IsEnabled(0x0C11);
+    if (scissor) hgl.Disable(0x0C11);
+    hgl.BlitFramebuffer(0, 0, input >= 0 ? g_dlssW : g_dlssOW, input >= 0 ? g_dlssH : g_dlssOH,
+                        vp[0], vp[1], vp[0] + vp[2], vp[1] + vp[3], 0x4000 /*COLOR_BUFFER_BIT*/, GL_NEAREST);
+    if (scissor) hgl.Enable(0x0C11);
+    hgl.BindFramebuffer(0x8CA8, (GLuint)readFb);
+    return 1;
+}
+
+static void framegen_before_ui(ProgRec *program) { (void)program; }
+static void framegen_after_scene(ProgRec *program) { (void)program; }
+static int framegen_swap(void) { return 0; }
+#endif
+
+#if AU_HAS_UPSCALER
 // Below Render Scale 100 PostEffectFS draws offscreen and Hytale then scales the frame into
 // the window with BasicFS (or TemporalAAFS draws it there): that draw is replaced.
 static int dlss_present(void)
@@ -2706,7 +2945,7 @@ static float halton(int i, int base)
 static void jitter_next_frame(void)
 {
     int width = 0, height = 0, phases = 8;
-#if AU_HAS_DLSS
+#if AU_HAS_UPSCALER
     if (g_setDlssJitter != 0 && g_dlssState == 1 && g_dlssProg && g_dlssW > 0 && g_frame - g_dlssPresentedFrame <= 2) {
         width = g_dlssW;
         height = g_dlssH;
@@ -2897,6 +3136,17 @@ static void check_extras(GLuint prog, ProgRec *p)
         GLint loc = r_glGetUniformLocation(prog, dlssUni[i].name);
         if (loc >= 0) { r_glUniform1i(loc, dlssUni[i].unit); p->usesDlss = 1; p->hasExtras = 1; }
     }
+    p->locMfxPass = r_glGetUniformLocation(prog, "uHookMfxPass");
+    p->locDlssResolve = r_glGetUniformLocation(prog, "uHookDlssResolve");
+    p->locDlssViewport = r_glGetUniformLocation(prog, "uHookDlssViewport");
+    p->locDlssSharpness = r_glGetUniformLocation(prog, "uHookDlssSharpness");
+    if (p->locMfxPass >= 0) {
+        GLint output = r_glGetUniformLocation(prog, "uHookMfxOutput");
+        if (output >= 0) r_glUniform1i(output, MFX_UNIT_OUTPUT);
+        r_glUniform1i(p->locMfxPass, 0);
+        p->usesDlss = 1;   // MetalFX takes DLSS's place in the draw hooks
+        p->hasExtras = 1;
+    }
     if (!p->usesDlss && g_dlssProg == prog) g_dlssProg = 0;
 }
 
@@ -2963,7 +3213,7 @@ static void apply_extras(ProgRec *p)
     if (p->locVoxGeo >= 0 || p->locVoxCol >= 0) vox_use(p);
     if (p->locMaterialLOD >= 0) {
         float bias = 0.0f;
-#if AU_HAS_DLSS
+#if AU_HAS_UPSCALER
         if (g_setDlssEnabled && g_dlssW > 0 && g_dlssOW > 0) bias = log2f((float)g_dlssW / (float)g_dlssOW);
 #endif
         r_glUniform1f(p->locMaterialLOD, bias);
@@ -3106,7 +3356,13 @@ static void settings_load(void)
     g_setDlssPreset = settings_num(txt, "AU_DLSS_PRESET", 0);
     g_setDlssRRPreset = settings_num(txt, "AU_DLSS_RR_PRESET", g_setDlssPreset);
     g_setDlssSharpness = fmin(1.0, fmax(0.0, settings_num(txt, "AU_DLSS_SHARPNESS", 0.2)));
+#if AU_HAS_METALFX
+    g_setDlssEnabled = settings_num(txt, "AU_METALFX", 0) > 0.5;   // the upscaler on this platform
+    g_setMfxDenoise = settings_num(txt, "AU_METALFX_DENOISER", 0) > 0.5;
+    g_setMfxMetal4 = settings_num(txt, "AU_METALFX_METAL4", 0) > 0.5;
+#else
     g_setDlssEnabled = settings_num(txt, "AU_DLSS", 0) > 0.5;
+#endif
     g_setTAAJitter = settings_num(txt, "AU_TAA", 1) > 0.5 && settings_num(txt, "AU_TAA_JITTER", 0) > 0.5;
     g_setUpscaleSharpness = fmin(1.0, fmax(0.0, settings_num(txt, "AU_UPSCALE_SHARPNESS", 0.3)));
     g_setHalfRes = settings_num(txt, "AU_HALF_RES_FX", 0) > 0.5;
@@ -3511,7 +3767,7 @@ static void menu_load(void)
         snprintf(m->define, sizeof(m->define), "%s", f[0]);
 #ifndef _WIN32
         if (!strcmp(m->define, "AU_DLSS_FRAMEGEN") || !strcmp(m->define, "!DLSS_FG_INFO")) continue;
-#if !AU_HAS_DLSS
+#if !AU_HAS_UPSCALER
         if (!strncmp(m->define, "AU_DLSS", 7) || !strcmp(m->define, "!DLSS_INFO") || !strcmp(m->define, "AU_RENDER_SCALE")) continue;
 #endif
 #endif
@@ -3660,13 +3916,20 @@ static void display_value(const MenuOpt *m, wchar_t *out, int cap)
 #endif
             return;
         }
-#if AU_HAS_DLSS
+#if AU_HAS_UPSCALER
+#if AU_HAS_METALFX
+        if (g_dlssState == 1 && g_dlssOW > 0 && g_frame - g_dlssPresentedFrame <= 30)
+            _snwprintf(out, cap, L"%dx%d  %d%%  %ls (%s)", g_dlssW, g_dlssH, (int)(100.0 * g_dlssW / g_dlssOW + 0.5),
+                       g_mfxDenoise > 0 ? L"denoised" : L"MetalFX", amf_backend());
+        else
+#else
         static const wchar_t *modes[] = {L"Performance", L"Balanced", L"Quality", L"Ultra Perf", L"Ultra Quality", L"DLAA"};
         int q = g_dlssOW > 0 ? dlss_quality(g_dlssW, g_dlssOW) : -1;
         if (g_dlssState == 1 && g_dlssOW > 0 && g_frame - g_dlssPresentedFrame <= 30)
             _snwprintf(out, cap, L"%dx%d  %d%%  %ls", g_dlssW, g_dlssH, (int)(100.0 * g_dlssW / g_dlssOW + 0.5),
                        q >= 0 && q <= 5 ? modes[q] : L"");
         else
+#endif
             _snwprintf(out, cap, L"%ls", g_dlssState == -1 ? L"unavailable" : L"not running");
 #else
         _snwprintf(out, cap, L"n/a");
@@ -4039,7 +4302,7 @@ static int menu_edit_mode(int foreground, SHORT altState)
 static RenderUIState render_ui_begin(void)
 {
     RenderUIState state = {0};
-#if AU_HAS_DLSS
+#if AU_HAS_UPSCALER
     if (g_renderAppliedScale >= 100 || !g_postPresent) return state;
     GLint framebuffer = -1;
     r_glGetIntegerv(0x8ca6, &framebuffer);

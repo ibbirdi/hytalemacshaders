@@ -18,16 +18,18 @@
 uniform vec2 uPixelSize;
 #include "DepthOfField_inc.glsl"
 #include "AU_Tonemap.glsl"
-#if AU_DEBUG || AU_LENSFLARE || AU_DLSS || AU_DLSS_FRAMEGEN || AU_ADAPTIVE_EXPOSURE
+#if AU_DEBUG || AU_LENSFLARE || AU_DLSS || AU_DLSS_FRAMEGEN || AU_ADAPTIVE_EXPOSURE || AU_METALFX
 #include "SceneData_inc.glsl"
 #include "AU_Common.glsl"
 #endif
-#if AU_LENSFLARE || AU_DLSS || AU_DLSS_FRAMEGEN
+#if AU_LENSFLARE || AU_DLSS || AU_DLSS_FRAMEGEN || AU_METALFX
 uniform sampler2D uHookDepth;   // DeferredFS linear depth (0..1 of the far plane), shared by the hook
 #endif
-#if AU_DLSS || AU_DLSS_FRAMEGEN
+#if AU_DLSS || AU_DLSS_FRAMEGEN || AU_METALFX
 #include "Reconstruction_inc.glsl"
 #include "AU_Temporal.glsl"
+#endif
+#if AU_DLSS || AU_DLSS_FRAMEGEN
 // DLSS inputs: textures shared with the hook's Vulkan device (hook/aud_dlss.c). The hook
 // upscales them with DLSS in place of Hytale's final scale-to-window draw.
 layout(rgba16f) uniform writeonly image2D auDlssColor;
@@ -42,17 +44,38 @@ uniform float uHookDlssSharpness;
 layout(r8) uniform writeonly image2D auDlssResponsive;
 #endif
 #if AU_DLSS
-// DLSS Ray Reconstruction also reads what each pixel's surface is made of (guide images,
-// units 5-7), worked out here from Hytale's G-buffer (shared by the hook).
+// DLSS Ray Reconstruction's guide images (units 5-7), from AU_SurfaceGuides below.
+layout(rgba8) uniform writeonly image2D auDlssAlbedo;
+layout(rgba8) uniform writeonly image2D auDlssSpecular;
+layout(rgba16f) uniform writeonly image2D auDlssNormals;
+uniform int uHookDlssRR;           // 1 while the hook runs Ray Reconstruction (guides bound)
+#endif
+#endif
+#if AU_METALFX
+// MetalFX (hook/aud_metalfx.m), the macOS counterpart of DLSS: the hook draws this pass a second
+// time into IOSurfaces it shares with Metal (uHookMfxPass 1; 2 adds the denoised scaler's guides),
+// then resolves MetalFX's output into the window in place of Hytale's scale-to-window draw.
+uniform int uHookMfxPass;
+uniform int uHookDlssResolve;
+uniform vec4 uHookDlssViewport;
+uniform sampler2DRect uHookMfxOutput;
+uniform float uHookDlssSharpness;
+layout(location = 1) out vec4 auMfxDepth;
+layout(location = 2) out vec4 auMfxMotion;
+layout(location = 3) out vec4 auMfxReactive;
+layout(location = 4) out vec4 auMfxAlbedo;
+layout(location = 5) out vec4 auMfxSpecular;
+layout(location = 6) out vec4 auMfxNormal;
+layout(location = 7) out vec4 auMfxRoughness;
+#endif
+#if AU_DLSS || AU_METALFX
+// DLSS Ray Reconstruction and MetalFX's denoised scaler also read what each pixel's surface is
+// made of, worked out here from Hytale's G-buffer (shared by the hook).
 #include "Deferred_inc.glsl"
 #include "AU_Surface.glsl"
 #include "AU_Material.glsl"
 uniform sampler2D uHookGBuffer0;   // albedo + render flags
 uniform sampler2D uHookGBuffer1;   // world-space normal (encoded)
-layout(rgba8) uniform writeonly image2D auDlssAlbedo;
-layout(rgba8) uniform writeonly image2D auDlssSpecular;
-layout(rgba16f) uniform writeonly image2D auDlssNormals;
-uniform int uHookDlssRR;           // 1 while the hook runs Ray Reconstruction (guides bound)
 
 // Average specular reflectance for a view angle (Karis' fit of the split-sum GGX lookup).
 vec3 AU_EnvBRDF(vec3 f0, float roughness, float NdotV)
@@ -64,7 +87,43 @@ vec3 AU_EnvBRDF(vec3 f0, float roughness, float NdotV)
     vec2 ab = vec2(-1.04, 1.04) * a004 + r.zw;
     return f0 * ab.x + ab.y;
 }
+
+// The denoisers' guides for one pixel: diffuse and specular albedo, world-space normal with linear
+// roughness in alpha. g0/g1: the G-buffer there, lin: its linear depth, posVS: its view position.
+void AU_SurfaceGuides(vec4 g0, vec4 g1, float lin, vec3 posVS, out vec3 diffuseAlbedo, out vec3 specularAlbedo, out vec4 normalRough)
+{
+    vec3 guideNormal = decodeNormal(g1.rg);
+    vec2 surfaceFootprint = AU_SurfaceFootprint(guideNormal, g0.rgb);
+    // Sky: the defaults NVIDIA recommends (grey albedo, no specular, no normal).
+    diffuseAlbedo = vec3(0.5);
+    specularAlbedo = vec3(0.0);
+    normalRough = vec4(0.0);
+    if (lin >= 1.0) return;
+    // The same material DeferredFS lit (include/AU_Material.glsl): dry gloss, metal,
+    // ore crystals and the rain film / soaking.
+    uint meta = uint(round(g0.a * 255.0));
+    bool emissive = (meta & 2u) != 0u;
+    bool foliage = !emissive && (meta & 1u) == 0u;
+    AU_InitCommon();
+    AU_MaterialData mat = AU_GetMaterial(g0.a, g0.rgb, guideNormal, g1.b, surfaceFootprint.y, emissive, foliage);
+    vec3 normal = AU_MaterialReflectionNormal(guideNormal, mat);
+    float roughness = 1.0 - AU_SpecularSmoothness(clamp(max(0.85 * mat.crystal, mat.smoothness), 0.0, 0.95), surfaceFootprint.x);
+    vec3 nVS = mat3(ViewMatrix) * normal;
+    float NdotV = clamp(dot(nVS, -normalize(posVS)), 0.0, 1.0);
+    vec3 albedo = AU_MaterialSoakedAlbedo(mix(vec3(GetLuminance(g0.rgb)), g0.rgb, AU_ALBEDO_SATURATION) * AU_ALBEDO_MULT, mat);
+    diffuseAlbedo = pow(clamp(albedo, 0.0, 1.0), vec3(2.2));
+    specularAlbedo = AU_EnvBRDF(mat.metal > 0.5 ? diffuseAlbedo : vec3(0.04 + 0.02 * mat.crystal), roughness, NdotV);
+    if (emissive) specularAlbedo = vec3(0.0);
+    if (mat.metal > 0.5) diffuseAlbedo *= 0.55;
+    normalRough = vec4(normal, roughness);
+}
 #endif
+#if AU_METALFX
+vec3 AU_ResolveFetch(vec2 uv) { return texture(uHookMfxOutput, uv * vec2(textureSize(uHookMfxOutput))).rgb; }
+vec2 AU_ResolveSize() { return vec2(textureSize(uHookMfxOutput)); }
+#elif AU_DLSS
+vec3 AU_ResolveFetch(vec2 uv) { return texture(uHookDlssOutput, uv).rgb; }
+vec2 AU_ResolveSize() { return vec2(textureSize(uHookDlssOutput, 0)); }
 #endif
 #if AU_LENSFLARE
 
@@ -260,7 +319,7 @@ in vec2 fragTexCoords;
 //-------------------------------------------------------------------------------------------------------------------------
 //                                  Out
 //-------------------------------------------------------------------------------------------------------------------------
-out vec4 outColor;
+layout(location = 0) out vec4 outColor;
 
 //-------------------------------------------------------------------------------------------------------------------------
 
@@ -344,17 +403,17 @@ vec3 computeDepthOfField(out bool isSharp)
 
 void main()
 {
-#if AU_DLSS
+#if AU_DLSS || AU_METALFX
     if (uHookDlssResolve == 1) {
         vec2 resolveUV = uHookDlssViewport.z > 0.0
             ? (gl_FragCoord.xy - uHookDlssViewport.xy) / uHookDlssViewport.zw : fragTexCoords;
-        vec2 outputPixel = 1.0 / vec2(textureSize(uHookDlssOutput, 0));
-        vec3 resolved = texture(uHookDlssOutput, resolveUV).rgb;
+        vec2 outputPixel = 1.0 / AU_ResolveSize();
+        vec3 resolved = AU_ResolveFetch(resolveUV);
         if (uHookDlssSharpness > 0.0) {
-            vec3 north = texture(uHookDlssOutput, resolveUV + vec2(0.0, outputPixel.y)).rgb;
-            vec3 south = texture(uHookDlssOutput, resolveUV - vec2(0.0, outputPixel.y)).rgb;
-            vec3 east = texture(uHookDlssOutput, resolveUV + vec2(outputPixel.x, 0.0)).rgb;
-            vec3 west = texture(uHookDlssOutput, resolveUV - vec2(outputPixel.x, 0.0)).rgb;
+            vec3 north = AU_ResolveFetch(resolveUV + vec2(0.0, outputPixel.y));
+            vec3 south = AU_ResolveFetch(resolveUV - vec2(0.0, outputPixel.y));
+            vec3 east = AU_ResolveFetch(resolveUV + vec2(outputPixel.x, 0.0));
+            vec3 west = AU_ResolveFetch(resolveUV - vec2(outputPixel.x, 0.0));
             vec3 low = min(resolved, min(min(north, south), min(east, west)));
             vec3 high = max(resolved, max(max(north, south), max(east, west)));
             resolved = clamp(resolved + (resolved - (north + south + east + west) * 0.25) * uHookDlssSharpness * 2.0, low, high);
@@ -419,7 +478,7 @@ void main()
     #endif // USE_DOF
 
 // -------------------------------------------- FXAA --------------------------------------------
-    #if USE_FXAA && !AU_DLSS
+    #if USE_FXAA && !AU_DLSS && !AU_METALFX
         color.rgb = isSharp ? FXAA(uColorTexture, texCoords, uPixelSize).rgb : color.rgb;
     #if USE_SHARPEN
         // Especially useful after FXAA, to compensate the blur produced
@@ -431,7 +490,7 @@ void main()
     #endif
 
 
-#if AU_SHARPENING > 0 && !AU_DLSS
+#if AU_SHARPENING > 0 && !AU_DLSS && !AU_METALFX
     // Image sharpening. Applied before Hytale's
     // temporal blend, which reuses its own output as history - sharpening after it would compound.
     if (isSharp) {
@@ -466,6 +525,40 @@ void main()
     }
     #endif
     vec3 dlssHDR = c;
+#if AU_METALFX
+    if (uHookMfxPass > 0) {
+        // MetalFX's inputs, as the DLSS ones below: the frame before exposure and tonemapping,
+        // its depth, the camera motion (where each pixel's surface was last frame, in pixels) and
+        // how much to trust this frame over the history (emissive, foliage, the hand).
+        vec2 inputSize = uHookDlssViewport.zw;
+        float lin = min(texture(uHookDepth, fragTexCoords).r, 1.0);
+        vec3 posVS = AU_ViewPosition(fragTexCoords, lin * FarClip);
+        vec4 previousClip = ReprojectionMatrix * vec4(posVS, lin >= 1.0 ? 0.0 : 1.0);
+        vec4 currentClip = ProjectionMatrix * vec4(posVS, lin >= 1.0 ? 0.0 : 1.0);
+        vec2 motion = vec2(0.0);
+        if (lin * FarClip >= AU_NEAR_IGNORE && uHookHistoryValid != 0 && previousClip.w > 0.00001 && currentClip.w > 0.00001)
+            motion = (previousClip.xy / previousClip.w - currentClip.xy / currentClip.w) * 0.5 * inputSize;
+        float viewDepth = max(lin * FarClip, NearClip);
+        outColor = vec4(dlssHDR, 1.0);
+        auMfxDepth = vec4(lin >= 1.0 ? 1.0 : clamp(GetDepthHWFromLinearDepth(viewDepth, ProjectionMatrix), 0.0, 1.0));
+        auMfxMotion = vec4(motion, 0.0, 0.0);
+        vec4 surface = texture(uHookGBuffer0, fragTexCoords), surfaceNormal = texture(uHookGBuffer1, fragTexCoords);
+        uint surfaceFlags = uint(round(surface.a * 255.0));
+        float reactive = lin >= 1.0 ? 0.0 : (surfaceFlags & 2u) != 0u ? 0.8
+            : (surfaceFlags & 1u) == 0u ? 0.5 : surfaceNormal.a < 0.5 ? 0.25 : 0.0;
+        auMfxReactive = vec4(lin * FarClip < AU_NEAR_IGNORE ? 0.8 : reactive);
+        if (uHookMfxPass == 2) {
+            vec3 diffuseAlbedo, specularAlbedo;
+            vec4 normalRough;
+            AU_SurfaceGuides(surface, surfaceNormal, lin, posVS, diffuseAlbedo, specularAlbedo, normalRough);
+            auMfxAlbedo = vec4(diffuseAlbedo, 1.0);
+            auMfxSpecular = vec4(specularAlbedo, 1.0);
+            auMfxNormal = vec4(normalRough.xyz, 0.0);
+            auMfxRoughness = vec4(normalRough.w);
+        }
+        return;
+    }
+#endif
 #if AU_ADAPTIVE_EXPOSURE
     c *= AU_AdaptiveExposure();
 #endif
@@ -568,32 +661,9 @@ void main()
         if (lin * FarClip < AU_NEAR_IGNORE) response = 0.8;
         imageStore(auDlssResponsive, pix, vec4(response));
         if (uHookDlssRR == 1) {
-            vec3 guideNormal = decodeNormal(responseNormal.rg);
-            vec2 surfaceFootprint = AU_SurfaceFootprint(guideNormal, responseSurface.rgb);
-            // Sky: the defaults NVIDIA recommends (grey albedo, no specular, no normal).
-            vec3 diffuseAlbedo = vec3(0.5), specularAlbedo = vec3(0.0);
-            vec4 normalRough = vec4(0.0);
-            if (lin < 1.0) {
-                vec4 g0 = responseSurface;
-                // The same material DeferredFS lit (include/AU_Material.glsl): dry gloss, metal,
-                // ore crystals and the rain film / soaking.
-                uint meta = uint(round(g0.a * 255.0));
-                bool emissive = (meta & 2u) != 0u;
-                bool foliage = !emissive && (meta & 1u) == 0u;
-                AU_InitCommon();
-                AU_MaterialData mat = AU_GetMaterial(g0.a, g0.rgb, guideNormal, responseNormal.b, surfaceFootprint.y,
-                                                     emissive, foliage);
-                vec3 normal = AU_MaterialReflectionNormal(guideNormal, mat);
-                float roughness = 1.0 - AU_SpecularSmoothness(clamp(max(0.85 * mat.crystal, mat.smoothness), 0.0, 0.95), surfaceFootprint.x);
-                vec3 nVS = mat3(ViewMatrix) * normal;
-                float NdotV = clamp(dot(nVS, -normalize(posVS)), 0.0, 1.0);
-                vec3 albedo = AU_MaterialSoakedAlbedo(mix(vec3(GetLuminance(g0.rgb)), g0.rgb, AU_ALBEDO_SATURATION) * AU_ALBEDO_MULT, mat);
-                diffuseAlbedo = pow(clamp(albedo, 0.0, 1.0), vec3(2.2));
-                specularAlbedo = AU_EnvBRDF(mat.metal > 0.5 ? diffuseAlbedo : vec3(0.04 + 0.02 * mat.crystal), roughness, NdotV);
-                if (emissive) specularAlbedo = vec3(0.0);
-                if (mat.metal > 0.5) diffuseAlbedo *= 0.55;
-                normalRough = vec4(normal, roughness);
-            }
+            vec3 diffuseAlbedo, specularAlbedo;
+            vec4 normalRough;
+            AU_SurfaceGuides(responseSurface, responseNormal, lin, posVS, diffuseAlbedo, specularAlbedo, normalRough);
             imageStore(auDlssAlbedo, pix, vec4(diffuseAlbedo, 1.0));
             imageStore(auDlssSpecular, pix, vec4(specularAlbedo, 1.0));
             imageStore(auDlssNormals, pix, normalRough);
