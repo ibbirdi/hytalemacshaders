@@ -607,6 +607,33 @@ static int check_metalfx_present(int metal4)
     if (!valid) fprintf(stderr, "FAIL MetalFX present: state %d, %dx%d -> %dx%d, pixel %d %d %d, framebuffer %d\n",
                         g_dlssState, g_dlssW, g_dlssH, g_dlssOW, g_dlssOH, pixel[0], pixel[1], pixel[2], framebuffer);
     else printf("MetalFX present: %dx%d -> %dx%d through the hook on %s\n", g_dlssW, g_dlssH, g_dlssOW, g_dlssOH, amf_backend());
+    // A window more than 3x the render size (Hytale's Render Scale on top of AU_RENDER_SCALE):
+    // MetalFX outputs 3x and the resolve stretches it, instead of MetalFX switching off.
+    if (valid) {
+        GLuint wide, wideFramebuffer;
+        hgl.GenTextures(1, &wide);
+        r_glBindTexture(GL_TEXTURE_2D, wide);
+        hgl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 256, 192, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        r_glBindTexture(GL_TEXTURE_2D, 0);
+        hgl.GenFramebuffers(1, &wideFramebuffer);
+        hgl.BindFramebuffer(0x8D40, wideFramebuffer);
+        hgl.FramebufferTexture2D(0x8D40, 0x8CE0, GL_TEXTURE_2D, wide, 0);
+        g_presentW = 256;
+        g_presentH = 192;
+        for (int frame = 0; frame < 2 && valid; frame++) {
+            hgl.BindFramebuffer(0x8D40, framebuffers[0]);
+            hgl.Viewport(0, 0, 64, 48);
+            r_glUseProgram(program);
+            dlss_draw(0x0004 /*TRIANGLES*/, 0, 3);
+            hgl.BindFramebuffer(0x8D40, wideFramebuffer);
+            hgl.Viewport(0, 0, 256, 192);
+            valid = g_dlssPending && dlss_present_rect(0, 0, 256, 192, "the test's window", 0);
+        }
+        readPixels(200, 150, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+        valid = valid && g_dlssState == 1 && g_mfxOutW == 192 && g_mfxOutH == 144
+             && abs(pixel[0] - 64) <= 8 && abs(pixel[1] - 128) <= 8 && abs(pixel[2] - 191) <= 8;
+        if (!valid) fprintf(stderr, "FAIL MetalFX past 3x: state %d, output %dx%d, pixel %d %d %d\n", g_dlssState, g_mfxOutW, g_mfxOutH, pixel[0], pixel[1], pixel[2]);
+    }
     hgl.BindFramebuffer(0x8D40, 0);
     g_curProg = g_dlssProg = 0;
     g_setDlssEnabled = 0;

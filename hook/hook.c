@@ -2954,6 +2954,7 @@ static void upscaler_set_camera(const float *worldToView, const float *viewToCli
 static int g_dlssW, g_dlssH, g_dlssReset, g_dlssNativeW, g_dlssNativeH;
 static int g_dlssOW, g_dlssOH, g_presentW, g_presentH;   // see the DLSS path
 static int g_mfxDenoise = -1, g_mfxMetal4 = -1;           // the configured scaler
+static int g_mfxOutW, g_mfxOutH;   // its output: the window, or 3x the render size when that is smaller
 static GLuint g_mfxFbo, g_mfxReadFbo, g_mfxInputVAO;
 static GLenum g_mfxInputMode;
 static GLint g_mfxInputFirst;
@@ -3030,7 +3031,15 @@ static void dlss_draw(GLenum mode, GLint first, GLsizei count)
     int denoise = g_setMfxDenoise && amf_denoiser_available();
     if (g_presentW > 0 && (renderWidth != g_dlssW || renderHeight != g_dlssH || vp[2] != g_dlssNativeW || vp[3] != g_dlssNativeH
                            || g_presentW != g_dlssOW || g_presentH != g_dlssOH || denoise != g_mfxDenoise || g_setMfxMetal4 != g_mfxMetal4)) {
-        if (!amf_configure(renderWidth, renderHeight, g_presentW, g_presentH, denoise, g_setMfxMetal4) || !mfx_framebuffer(denoise)) {
+        // MetalFX upscales at most 3x per axis (supportedInputContentMaxScale on Apple GPUs): past
+        // that, as when Hytale's own Render Scale adds to AU_RENDER_SCALE, it upscales 3x and the
+        // resolve stretches the rest of the way.
+        double stretch = fmax((double)g_presentW / (3.0 * renderWidth), (double)g_presentH / (3.0 * renderHeight));
+        g_mfxOutW = stretch > 1.0 ? (int)(g_presentW / stretch) : g_presentW;
+        g_mfxOutH = stretch > 1.0 ? (int)(g_presentH / stretch) : g_presentH;
+        if (stretch > 1.0) logf_("metalfx: %dx%d is more than 3x below the window; MetalFX outputs %dx%d (set Hytale's Render Scale to 100%%)",
+                                 renderWidth, renderHeight, g_mfxOutW, g_mfxOutH);
+        if (!amf_configure(renderWidth, renderHeight, g_mfxOutW, g_mfxOutH, denoise, g_setMfxMetal4) || !mfx_framebuffer(denoise)) {
             mfx_fail("configuring the scaler failed");
             r_glDrawArrays(mode, first, count);
             return;
@@ -3134,8 +3143,8 @@ static int dlss_present_rect(int x, int y, int w, int h, const char *how, int di
     hgl.FramebufferTexture2D(0x8CA8, 0x8CE0, 0x84F5 /*TEXTURE_RECTANGLE*/, amf_texture(input >= 0 ? input : AMF_TEX_OUTPUT), 0);
     GLboolean scissor = hgl.IsEnabled(0x0C11);
     if (scissor) hgl.Disable(0x0C11);
-    hgl.BlitFramebuffer(0, 0, input >= 0 ? g_dlssW : g_dlssOW, input >= 0 ? g_dlssH : g_dlssOH,
-                        vp[0], vp[1], vp[0] + vp[2], vp[1] + vp[3], 0x4000 /*COLOR_BUFFER_BIT*/, GL_NEAREST);
+    hgl.BlitFramebuffer(0, 0, input >= 0 ? g_dlssW : g_mfxOutW, input >= 0 ? g_dlssH : g_mfxOutH,
+                        vp[0], vp[1], vp[0] + vp[2], vp[1] + vp[3], 0x4000 /*COLOR_BUFFER_BIT*/, GL_LINEAR);
     if (scissor) hgl.Enable(0x0C11);
     hgl.BindFramebuffer(0x8CA8, (GLuint)readFb);
     return 1;
@@ -4229,9 +4238,11 @@ static void display_value(const MenuOpt *m, wchar_t *out, int cap)
         }
 #if AU_HAS_UPSCALER
 #if AU_HAS_METALFX
+        // Hytale's own Render Scale below 100 shrinks the scene again under AU_RENDER_SCALE.
+        int stacked = g_dlssOW > 0 && g_dlssW * 100 < g_dlssOW * g_renderAppliedScale * 9 / 10;
         if (g_dlssState == 1 && g_dlssOW > 0 && g_frame - g_dlssPresentedFrame <= 30)
-            _snwprintf(out, cap, L"%dx%d  %d%%  %ls (%s)", g_dlssW, g_dlssH, (int)(100.0 * g_dlssW / g_dlssOW + 0.5),
-                       g_mfxDenoise > 0 ? L"denoised" : L"MetalFX", amf_backend());
+            _snwprintf(out, cap, L"%dx%d  %d%%  %ls (%s)%ls", g_dlssW, g_dlssH, (int)(100.0 * g_dlssW / g_dlssOW + 0.5),
+                       g_mfxDenoise > 0 ? L"denoised" : L"MetalFX", amf_backend(), stacked ? L" - set Hytale Render Scale to 100%" : L"");
         else
 #else
         static const wchar_t *modes[] = {L"Performance", L"Balanced", L"Quality", L"Ultra Perf", L"Ultra Quality", L"DLAA"};
