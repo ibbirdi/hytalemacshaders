@@ -3686,6 +3686,7 @@ static void settings_load(void)
 }
 
 static void materials_reset(void);
+static void pack_written(void);
 
 static void do_reload(void)
 {
@@ -3704,12 +3705,14 @@ static void do_reload(void)
         wchar_t path[MAX_PATH];
         pack_path(path, "programs\\_profile");
         DeleteFileW(path);
+        pack_written();   // the flag's removal is the hook's own change, not an edit to reload for
         if (g_profState == 0) g_profState = 1;
     }
     if (pack_flag("programs\\_trace")) {
         wchar_t path[MAX_PATH];
         pack_path(path, "programs\\_trace");
         DeleteFileW(path);
+        pack_written();
         g_traceRemaining = 800;
     }
 #if AU_HAS_DLSS
