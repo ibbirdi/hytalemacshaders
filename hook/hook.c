@@ -358,10 +358,12 @@ static void expand(Str *out, const char *text, int depth)
                     }
 #endif
 #ifdef __APPLE__
-                    // macOS OpenGL 4.1 has no image load/store: no voxel grid, no image-based GI history.
+                    // macOS OpenGL 4.1 has no image load/store: the voxel grid lives in the hook's atlas
+                    // (path tracing, voxel scattering), but the light list (coloured area lights, light
+                    // fog) and the image-based GI history have no counterpart.
                     if (!strcmp(name, "AU_Settings.glsl"))
-                        str_cstr(out, "#undef AU_LOCAL_LIGHTS\n#define AU_LOCAL_LIGHTS 0\n#undef AU_PATH_TRACING\n#define AU_PATH_TRACING 0\n"
-                                      "#undef AU_GI_DENOISER\n#define AU_GI_DENOISER 0\n#if AU_SSS_VOXEL == 1\n#undef AU_SSS_VOXEL\n#define AU_SSS_VOXEL 0\n#endif\n");
+                        str_cstr(out, "#undef AU_VOXEL_ATLAS\n#define AU_VOXEL_ATLAS 1\n#undef AU_LOCAL_LIGHTS\n#define AU_LOCAL_LIGHTS 0\n"
+                                      "#undef AU_LIGHT_FOG\n#define AU_LIGHT_FOG 0\n#undef AU_GI_DENOISER\n#define AU_GI_DENOISER 0\n");
 #endif
                     str_cstr(out, "\n// END ");
                     str_cstr(out, name);
@@ -529,6 +531,7 @@ typedef struct {
     GLint locCurrentProjection;
     GLint locGICompact, locGISourceSize, locGIPreviousInverse, locGIPreviousDepth;
     GLint locVoxGeo, locVoxCol;
+    GLint locVoxGeoAtlas, locVoxColAtlas, locVoxFeed;   // the grid without image load/store (AU_VOXEL_ATLAS)
     GLint locNativeEmission;
     GLint locMaterialLOD;
     GLint locJitter, locUIFragmentScale;
@@ -1472,6 +1475,10 @@ static void ensure_textures(void)
 #define VOX_UNIT_LIGHTS 3
 #define VOX_LIGHTS_W 2049
 #define VOX_LIGHTS_H 37
+#define VOX_UNIT_GEO_ATLAS (HOOK_UNIT_BASE + 7)    // texture units of the atlas grid and its feed
+#define VOX_UNIT_COL_ATLAS (HOOK_UNIT_BASE + 8)
+#define VOX_UNIT_FEED_CELLS (HOOK_UNIT_BASE + 9)
+#define VOX_UNIT_FEED_COLOR (HOOK_UNIT_BASE + 10)
 
 typedef void (APIENTRY *PFN_glTexImage3D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
 typedef void (APIENTRY *PFN_glBindImageTexture)(GLuint, GLuint, GLint, GLboolean, GLint, GLenum, GLenum);
@@ -1484,6 +1491,11 @@ static GLuint g_voxTex[2];
 static GLuint g_voxLights;
 static int g_voxState;            // 0 not created yet, 1 ready, -1 unavailable
 static char g_voxLastUser[64];    // pname of the last program that used the grid
+static int g_voxAtlasMode;        // the grid lives in 2D textures (vox_atlas_create)
+static GLuint g_voxAtlas[2];      // R32UI cells, RGBA8 colours
+static int vox_atlas_create(void);
+static void vox_atlas_clear(void);
+static void vox_atlas_release(void);
 
 static void vox_create(void)
 {
@@ -1495,7 +1507,12 @@ static void vox_create(void)
     PFN_glGetError getErr = (PFN_glGetError)GetProcAddress(g_real, "glGetError");
     r_glBindImageTexture = (PFN_glBindImageTexture)real_wglGetProcAddress("glBindImageTexture");
     r_glMemoryBarrier = (PFN_glMemoryBarrier)real_wglGetProcAddress("glMemoryBarrier");
-    if (!img3d || !bindBuf || !r_glBindImageTexture || !r_glMemoryBarrier) { logf_("voxels: image load/store not available"); return; }
+    if (!img3d || !bindBuf || !r_glBindImageTexture || !r_glMemoryBarrier) {
+        // macOS's OpenGL 4.1: the grid as 2D textures the shaders read and the hook writes.
+        if (vox_atlas_create()) { g_voxAtlasMode = 1; g_voxState = 1; }
+        else logf_("voxels: image load/store not available");
+        return;
+    }
     void *zero = calloc((size_t)VOX_X * VOX_Y * VOX_Z, 4);
     if (!zero) return;
     while (getErr() != 0) {}
@@ -1537,6 +1554,7 @@ static void vox_clear(void)
     typedef void (APIENTRY *PFN_glClearTexImage)(GLuint, GLint, GLenum, GLenum, const void *);
     static PFN_glClearTexImage clr;
     if (g_voxState != 1) return;
+    if (g_voxAtlasMode) { vox_atlas_clear(); return; }
     if (!clr) clr = (PFN_glClearTexImage)real_wglGetProcAddress("glClearTexImage");
     if (!clr) return;
     clr(g_voxTex[0], 0, GL_RED_INTEGER, GL_UNSIGNED_INT, NULL);
@@ -1671,10 +1689,12 @@ static void gi_bind(int temporal, int raw, int divisor, int compact, int lights)
     r_glActiveTexture(GL_TEXTURE0 + g_activeUnit);
 }
 
+static void vox_atlas_feed(ProgRec *program, GLenum mode, GLint first, GLsizei count);
+
 static void gi_draw(GLenum mode, GLint first, GLsizei count)
 {
     ProgRec *program = prog_rec(g_curProg, 0);
-    if (!program || program->locPTPass < 0 || (program->locVoxGeo >= 0 && g_voxState != 1)) {
+    if (!program || program->locPTPass < 0 || ((program->locVoxGeo >= 0 || program->locVoxGeoAtlas >= 0) && g_voxState != 1)) {
         r_glDrawArrays(mode, first, count);
         return;
     }
@@ -1687,7 +1707,8 @@ static void gi_draw(GLenum mode, GLint first, GLsizei count)
     if (useHistory) gi_bind(1, 0, 1, 0, program->giLights);
     else gi_release();
     if (useHistory && !g_giTex[0][0]) useHistory = 0;
-    if (program->locVoxCol >= 0) {
+    if (program->locVoxFeed >= 0) vox_atlas_feed(program, mode, first, count);
+    else if (program->locVoxCol >= 0) {
         profile_use("GI voxel feed");
         r_glUniform1i(program->locPTPass, 1);
         r_glDrawArrays(mode, first, count);
@@ -1753,6 +1774,12 @@ static struct {
     void (APIENTRY *TexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
     void (APIENTRY *TexParameteri)(GLenum, GLenum, GLint);
     void (APIENTRY *BindVertexArray)(GLuint);
+    void (APIENTRY *GenVertexArrays)(GLsizei, GLuint *);
+    void (APIENTRY *ClearBufferuiv)(GLenum, GLint, const GLuint *);
+    void (APIENTRY *BlendFuncSeparate)(GLenum, GLenum, GLenum, GLenum);
+    void (APIENTRY *BlendColor)(GLfloat, GLfloat, GLfloat, GLfloat);
+    void (APIENTRY *GetFloatv)(GLenum, GLfloat *);
+    GLuint (APIENTRY *CreateProgram)(void);
     void (APIENTRY *Flush)(void);
     void (APIENTRY *BlitFramebuffer)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLuint, GLenum);
 } hgl;   // GL entry points of the hook's own offscreen passes
@@ -1776,7 +1803,9 @@ static int hook_gl_ready(void)
     HGL(IsEnabled, "glIsEnabled") HGL(Enable, "glEnable") HGL(Disable, "glDisable") HGL(ColorMask, "glColorMask")
     HGL(GetBooleanv, "glGetBooleanv") HGL(GenTextures, "glGenTextures") HGL(DeleteTextures, "glDeleteTextures")
     HGL(TexImage2D, "glTexImage2D") HGL(TexParameteri, "glTexParameteri") HGL(BindVertexArray, "glBindVertexArray")
-    HGL(Flush, "glFlush") HGL(BlitFramebuffer, "glBlitFramebuffer")
+    HGL(Flush, "glFlush") HGL(BlitFramebuffer, "glBlitFramebuffer") HGL(GenVertexArrays, "glGenVertexArrays")
+    HGL(ClearBufferuiv, "glClearBufferuiv") HGL(BlendFuncSeparate, "glBlendFuncSeparate") HGL(BlendColor, "glBlendColor")
+    HGL(GetFloatv, "glGetFloatv") HGL(CreateProgram, "glCreateProgram")
 #undef HGL
     state = 1;
     return 1;
@@ -1879,6 +1908,7 @@ static int half_targets(int width, int height)
 
 static void half_draw(ProgRec *program, GLenum mode, GLint first, GLsizei count)
 {
+    if (program->locVoxFeed >= 0 && g_voxState == 1) vox_atlas_feed(program, mode, first, count);
     GLint viewport[4] = {0};
     r_glGetIntegerv(GL_VIEWPORT, viewport);
     int width = (viewport[2] + 1) / 2, height = (viewport[3] + 1) / 2;
@@ -1901,6 +1931,227 @@ static void half_draw(ProgRec *program, GLenum mode, GLint first, GLsizei count)
     r_glUniform1i(program->locHalfPass, 2);
     r_glDrawArrays(mode, first, count);
     r_glUniform1i(program->locHalfPass, 0);
+}
+
+// ----------------------------------------------------------------------------------------
+// The voxel grid without image load/store (macOS's OpenGL 4.1; shaders: AU_VOXEL_ATLAS). The two
+// 3D images become 2D textures, z slices of 256x128 cells in a 16x16 tile atlas (4096x2048):
+// cells (R32UI) and colours (RGBA8), which the shaders read with texelFetch. Nothing draws the
+// terrain into the grid any more: DeferredFS's pass 1 (vox_atlas_feed) runs at a quarter of the
+// size, on another pixel of each 4x4 block every frame, and writes what each terrain pixel shows
+// (AU_VoxFeedAtlas: the block behind it, a block in front of a face that has become air, the
+// surface's colour) into a small feed target. One point per feed texel then scatters that into
+// the atlas: the air first, the blocks seen after (they win), the colours last, blended in.
+
+#define VOX_ATLAS_W 4096
+#define VOX_ATLAS_H 2048
+static GLuint g_voxAtlasFbo, g_voxFeedFbo, g_voxFeedTex[2], g_voxScatter, g_voxScatterVAO;
+static GLint g_voxScatterMode, g_voxScatterWidth;
+static int g_voxFeedW, g_voxFeedH, g_voxScatterFailed;
+
+static int vox_atlas_create(void)
+{
+    if (!hook_gl_ready()) return 0;
+    GLint previousTexture = 0, previousFramebuffer = 0;
+    r_glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
+    r_glGetIntegerv(0x8CA6 /*DRAW_FRAMEBUFFER_BINDING*/, &previousFramebuffer);
+    hgl.GenTextures(2, g_voxAtlas);
+    for (int i = 0; i < 2; i++) {
+        r_glBindTexture(GL_TEXTURE_2D, g_voxAtlas[i]);
+        hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        if (i == 0) hgl.TexImage2D(GL_TEXTURE_2D, 0, GL_R32UI, VOX_ATLAS_W, VOX_ATLAS_H, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, NULL);
+        else hgl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, VOX_ATLAS_W, VOX_ATLAS_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    }
+    r_glBindTexture(GL_TEXTURE_2D, (GLuint)previousTexture);
+    hgl.GenFramebuffers(1, &g_voxAtlasFbo);
+    hgl.BindFramebuffer(0x8CA9 /*DRAW_FRAMEBUFFER*/, g_voxAtlasFbo);
+    hgl.FramebufferTexture2D(0x8CA9, 0x8CE0, GL_TEXTURE_2D, g_voxAtlas[0], 0);
+    hgl.FramebufferTexture2D(0x8CA9, 0x8CE1, GL_TEXTURE_2D, g_voxAtlas[1], 0);
+    GLenum status = hgl.CheckFramebufferStatus(0x8CA9);
+    hgl.BindFramebuffer(0x8CA9, (GLuint)previousFramebuffer);
+    if (status != 0x8CD5 /*FRAMEBUFFER_COMPLETE*/) {
+        logf_("voxels: atlas framebuffer incomplete (0x%x)", status);
+        vox_atlas_release();
+        return 0;
+    }
+    vox_atlas_clear();
+    logf_("voxels: %dx%dx%d grid in a %dx%d atlas (no image load/store)", VOX_X, VOX_Y, VOX_Z, VOX_ATLAS_W, VOX_ATLAS_H);
+    return 1;
+}
+
+static void vox_atlas_clear(void)
+{
+    if (!g_voxAtlasFbo) return;
+    static const GLuint unknown[4] = {0, 0, 0, 0};
+    static const GLfloat none[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    HookPassState state = hook_pass_begin(g_voxAtlasFbo, VOX_ATLAS_W, VOX_ATLAS_H);
+    static const GLenum buffers[2] = {0x8CE0, 0x8CE1};
+    hgl.DrawBuffers(2, buffers);
+    hgl.ClearBufferuiv(0x1800 /*COLOR*/, 0, unknown);
+    hgl.ClearBufferfv(0x1800, 1, none);
+    hook_pass_end(&state);
+}
+
+static void vox_atlas_release(void)
+{
+    if (g_voxAtlas[0]) {
+        hook_bind_unit(VOX_UNIT_GEO_ATLAS, 0);
+        hook_bind_unit(VOX_UNIT_COL_ATLAS, 0);
+        hgl.DeleteTextures(2, g_voxAtlas);
+    }
+    g_voxAtlas[0] = g_voxAtlas[1] = 0;
+}
+
+// Feed target: colour (RGBA8, attachment 0) and cells (RGBA32UI, attachment 2: DeferredFS's
+// output 1 is the half-resolution light shafts).
+static int vox_feed_targets(int width, int height)
+{
+    if (g_voxFeedTex[0] && width == g_voxFeedW && height == g_voxFeedH) return 1;
+    if (g_voxFeedTex[0]) {
+        hook_bind_unit(VOX_UNIT_FEED_COLOR, 0);
+        hook_bind_unit(VOX_UNIT_FEED_CELLS, 0);
+        hgl.DeleteTextures(2, g_voxFeedTex);
+    }
+    if (!g_voxFeedFbo) hgl.GenFramebuffers(1, &g_voxFeedFbo);
+    GLint previousTexture = 0, previousFramebuffer = 0;
+    r_glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
+    r_glGetIntegerv(0x8CA6 /*DRAW_FRAMEBUFFER_BINDING*/, &previousFramebuffer);
+    hgl.GenTextures(2, g_voxFeedTex);
+    hgl.BindFramebuffer(0x8CA9 /*DRAW_FRAMEBUFFER*/, g_voxFeedFbo);
+    for (int i = 0; i < 2; i++) {
+        r_glBindTexture(GL_TEXTURE_2D, g_voxFeedTex[i]);
+        hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        if (i == 0) hgl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        else hgl.TexImage2D(GL_TEXTURE_2D, 0, 0x8D70 /*RGBA32UI*/, width, height, 0, 0x8D99 /*RGBA_INTEGER*/, GL_UNSIGNED_INT, NULL);
+        hgl.FramebufferTexture2D(0x8CA9, i ? 0x8CE2 : 0x8CE0, GL_TEXTURE_2D, g_voxFeedTex[i], 0);
+    }
+    static const GLenum buffers[3] = {0x8CE0, 0 /*NONE*/, 0x8CE2};
+    hgl.DrawBuffers(3, buffers);
+    GLenum status = hgl.CheckFramebufferStatus(0x8CA9);
+    hgl.BindFramebuffer(0x8CA9, (GLuint)previousFramebuffer);
+    r_glBindTexture(GL_TEXTURE_2D, (GLuint)previousTexture);
+    if (status != 0x8CD5) { logf_("voxels: feed framebuffer incomplete (0x%x)", status); return 0; }
+    g_voxFeedW = width;
+    g_voxFeedH = height;
+    return 1;
+}
+
+// One point per feed texel, at the atlas texel of its cell (mode 0: the air in front of faces,
+// 1: the blocks seen, 2: their colours; texels without one are moved off the target).
+static int vox_scatter_program(void)
+{
+    if (g_voxScatter || g_voxScatterFailed) return g_voxScatter != 0;
+    static const char *vertex =
+        "#version 410 core\n"
+        "uniform usampler2D uFeedCells;\nuniform sampler2D uFeedColor;\nuniform int uFeedWidth;\nuniform int uScatterMode;\n"
+        "flat out uint vValue;\nout vec4 vColor;\n"
+        "void main()\n{\n"
+        "    ivec2 texel = ivec2(gl_VertexID % uFeedWidth, gl_VertexID / uFeedWidth);\n"
+        "    uvec4 cells = texelFetch(uFeedCells, texel, 0);\n"
+        "    vColor = texelFetch(uFeedColor, texel, 0);\n"
+        "    uint cell = uScatterMode == 0 ? cells.z : cells.x;\n"
+        "    vValue = uScatterMode == 0 ? cells.w : cells.y;\n"
+        "    bool none = cell == 0xffffffffu || (uScatterMode == 2 && vColor.a == 0.0);\n"
+        "    vec2 position = (vec2(float(cell & 0xffffu), float(cell >> 16)) + 0.5) / vec2(4096.0, 2048.0) * 2.0 - 1.0;\n"
+        "    gl_Position = none ? vec4(-2.0, -2.0, 0.0, 1.0) : vec4(position, 0.0, 1.0);\n"
+        "}\n";
+    static const char *fragment =
+        "#version 410 core\n"
+        "flat in uint vValue;\nin vec4 vColor;\n"
+        "layout(location = 0) out uvec4 cell;\nlayout(location = 1) out vec4 colour;\n"
+        "void main() { cell = uvec4(vValue); colour = vColor; }\n";
+    GLuint shaders[2] = {compile_new(GL_VERTEX_SHADER, vertex, "VoxelScatter"), compile_new(GL_FRAGMENT_SHADER, fragment, "VoxelScatter")};
+    GLuint program = shaders[0] && shaders[1] ? hgl.CreateProgram() : 0;
+    GLint linked = 0;
+    if (program) {
+        r_glAttachShader(program, shaders[0]);
+        r_glAttachShader(program, shaders[1]);
+        r_glLinkProgram(program);
+        r_glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    }
+    for (int i = 0; i < 2; i++) if (shaders[i]) r_glDeleteShader(shaders[i]);
+    if (!linked) {
+        logf_("voxels: the scatter program failed; the grid stays empty");
+        if (program) r_glDeleteProgram(program);
+        g_voxScatterFailed = 1;
+        return 0;
+    }
+    GLint previous = 0;
+    r_glGetIntegerv(GL_CURRENT_PROGRAM, &previous);
+    r_glUseProgram(program);
+    r_glUniform1i(r_glGetUniformLocation(program, "uFeedCells"), VOX_UNIT_FEED_CELLS);
+    r_glUniform1i(r_glGetUniformLocation(program, "uFeedColor"), VOX_UNIT_FEED_COLOR);
+    g_voxScatterMode = r_glGetUniformLocation(program, "uScatterMode");
+    g_voxScatterWidth = r_glGetUniformLocation(program, "uFeedWidth");
+    r_glUseProgram((GLuint)previous);
+    hgl.GenVertexArrays(1, &g_voxScatterVAO);
+    g_voxScatter = program;
+    return 1;
+}
+
+// DeferredFS's draw: feed pass, then the scatter into the atlas (see above).
+static void vox_atlas_feed(ProgRec *program, GLenum mode, GLint first, GLsizei count)
+{
+    if (!g_voxAtlasMode || g_voxState != 1 || program->locVoxFeed < 0 || program->locPTPass < 0) return;
+    GLint viewport[4] = {0};
+    r_glGetIntegerv(GL_VIEWPORT, viewport);
+    int width = (viewport[2] + 3) / 4, height = (viewport[3] + 3) / 4;
+    if (width < 1 || height < 1 || !vox_feed_targets(width, height) || !vox_scatter_program()) return;
+    // This frame's pixel of each 4x4 block, in an order that spreads them out (4x4 Bayer).
+    static const int bayer[16] = {0, 10, 2, 8, 5, 15, 7, 13, 1, 11, 3, 9, 4, 14, 6, 12};
+    int phase = bayer[g_frame & 15];
+    float offsetX = ((float)(phase & 3) - 1.5f) / (float)viewport[2], offsetY = ((float)(phase >> 2) - 1.5f) / (float)viewport[3];
+    profile_use("Voxel feed");
+    static const GLfloat noColor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    static const GLuint noCells[4] = {0xffffffffu, 0, 0xffffffffu, 0};
+    HookPassState state = hook_pass_begin(g_voxFeedFbo, width, height);
+    hgl.ClearBufferfv(0x1800 /*COLOR*/, 0, noColor);
+    hgl.ClearBufferuiv(0x1800, 2, noCells);
+    r_glUniform2f(program->locVoxFeed, offsetX, offsetY);
+    r_glUniform1i(program->locPTPass, 1);
+    r_glDrawArrays(mode, first, count);
+    r_glUniform1i(program->locPTPass, 0);
+    hook_pass_end(&state);
+
+    profile_use("Voxel scatter");
+    GLint previousProgram = 0, previousVAO = 0, blend[4];
+    GLfloat blendColor[4];
+    r_glGetIntegerv(GL_CURRENT_PROGRAM, &previousProgram);
+    r_glGetIntegerv(0x85B5 /*VERTEX_ARRAY_BINDING*/, &previousVAO);
+    const GLenum blendQueries[4] = {0x80C9 /*SRC_RGB*/, 0x80C8 /*DST_RGB*/, 0x80CB /*SRC_ALPHA*/, 0x80CA /*DST_ALPHA*/};
+    for (int i = 0; i < 4; i++) r_glGetIntegerv(blendQueries[i], &blend[i]);
+    hgl.GetFloatv(0x8005 /*BLEND_COLOR*/, blendColor);
+    hook_bind_unit(VOX_UNIT_FEED_COLOR, g_voxFeedTex[0]);
+    hook_bind_unit(VOX_UNIT_FEED_CELLS, g_voxFeedTex[1]);
+    state = hook_pass_begin(g_voxAtlasFbo, VOX_ATLAS_W, VOX_ATLAS_H);
+    r_glUseProgram(g_voxScatter);
+    hgl.BindVertexArray(g_voxScatterVAO);
+    r_glUniform1i(g_voxScatterWidth, width);
+    static const GLenum cellsOnly[2] = {0x8CE0, 0 /*NONE*/}, coloursOnly[2] = {0 /*NONE*/, 0x8CE1};
+    hgl.DrawBuffers(2, cellsOnly);
+    for (int scatter = 0; scatter < 2; scatter++) {
+        r_glUniform1i(g_voxScatterMode, scatter);
+        r_glDrawArrays(0x0000 /*POINTS*/, 0, width * height);
+    }
+    // Colours drift towards what is seen (a steady average of each block's texture).
+    hgl.DrawBuffers(2, coloursOnly);
+    hgl.Enable(0x0BE2 /*BLEND*/);
+    hgl.BlendFuncSeparate(0x8003 /*CONSTANT_ALPHA*/, 0x8004 /*ONE_MINUS_CONSTANT_ALPHA*/, 1 /*ONE*/, 0 /*ZERO*/);
+    hgl.BlendColor(0.0f, 0.0f, 0.0f, 0.1f);
+    r_glUniform1i(g_voxScatterMode, 2);
+    r_glDrawArrays(0x0000 /*POINTS*/, 0, width * height);
+    hgl.Disable(0x0BE2);
+    hgl.BlendFuncSeparate((GLenum)blend[0], (GLenum)blend[1], (GLenum)blend[2], (GLenum)blend[3]);
+    hgl.BlendColor(blendColor[0], blendColor[1], blendColor[2], blendColor[3]);
+    hgl.BindVertexArray((GLuint)previousVAO);
+    r_glUseProgram((GLuint)previousProgram);
+    hook_pass_end(&state);
+    hook_bind_unit(VOX_UNIT_GEO_ATLAS, g_voxAtlas[0]);
+    hook_bind_unit(VOX_UNIT_COL_ATLAS, g_voxAtlas[1]);
 }
 
 // ----------------------------------------------------------------------------------------
@@ -2227,10 +2478,17 @@ static void materials_use(ProgRec *p)
     r_glActiveTexture(GL_TEXTURE0 + g_activeUnit);
 }
 
+static void hook_bind_unit(GLuint unit, GLuint texture);
+
 static void vox_use(ProgRec *p)
 {
     if (!g_voxState) vox_create();
     if (g_voxState != 1) return;
+    if (g_voxAtlasMode) {
+        hook_bind_unit(VOX_UNIT_GEO_ATLAS, g_voxAtlas[0]);
+        hook_bind_unit(VOX_UNIT_COL_ATLAS, g_voxAtlas[1]);
+        return;
+    }
     if (p->locVoxCol >= 0 && !g_voxTex[1]) {
         PFN_glTexImage3D image = (PFN_glTexImage3D)real_wglGetProcAddress("glTexImage3D");
         PFN_glBindBuffer bindBuffer = (PFN_glBindBuffer)real_wglGetProcAddress("glBindBuffer");
@@ -3077,6 +3335,12 @@ static void check_extras(GLuint prog, ProgRec *p)
     if (p->locJitter >= 0) p->hasExtras = 1;
     p->locVoxGeo = r_glGetUniformLocation(prog, "auVoxGeo");
     p->locVoxCol = r_glGetUniformLocation(prog, "auVoxCol");
+    p->locVoxGeoAtlas = r_glGetUniformLocation(prog, "auVoxGeoAtlas");
+    p->locVoxColAtlas = r_glGetUniformLocation(prog, "auVoxColAtlas");
+    p->locVoxFeed = r_glGetUniformLocation(prog, "uHookVoxFeedOffset");
+    if (p->locVoxGeoAtlas >= 0) r_glUniform1i(p->locVoxGeoAtlas, VOX_UNIT_GEO_ATLAS);
+    if (p->locVoxColAtlas >= 0) r_glUniform1i(p->locVoxColAtlas, VOX_UNIT_COL_ATLAS);
+    if (p->locVoxGeoAtlas >= 0 || p->locVoxColAtlas >= 0 || p->locVoxFeed >= 0) p->hasExtras = 1;
     if (p->locVoxGeo >= 0) r_glUniform1i(p->locVoxGeo, VOX_UNIT_GEO);
     if (p->locVoxCol >= 0) r_glUniform1i(p->locVoxCol, VOX_UNIT_COL);
     GLint locLights = r_glGetUniformLocation(prog, "auLights");
@@ -3210,7 +3474,7 @@ static void apply_extras(ProgRec *p)
             if (!strcmp(src->uni[k].name, g_fwd[i].srcUni)) { replay_uniform_at(&src->uni[k], p->fwdLoc[i]); break; }
         }
     }
-    if (p->locVoxGeo >= 0 || p->locVoxCol >= 0) vox_use(p);
+    if (p->locVoxGeo >= 0 || p->locVoxCol >= 0 || p->locVoxGeoAtlas >= 0 || p->locVoxColAtlas >= 0 || p->locVoxFeed >= 0) vox_use(p);
     if (p->locMaterialLOD >= 0) {
         float bias = 0.0f;
 #if AU_HAS_UPSCALER
@@ -3386,7 +3650,16 @@ static void settings_load(void)
             g_voxTex[1] = 0;
         }
     }
-    if (!g_setVoxelColors && settings_num(txt, "AU_LOCAL_LIGHTS", 1) < 0.5 && g_voxState == 1) {
+#ifdef __APPLE__
+    // The atlas grid (no local lights here): only path tracing and voxel scattering read it.
+    if (g_voxAtlasMode && g_voxState == 1 && !g_setVoxelColors
+        && !(settings_num(txt, "AU_SSS", 1) > 0.5 && fabs(settings_num(txt, "AU_SSS_VOXEL", 1) - 1.0) < 0.5)) {
+        vox_atlas_release();
+        g_voxState = 0;
+        g_voxLastUser[0] = 0;
+    }
+#endif
+    if (!g_voxAtlasMode && !g_setVoxelColors && settings_num(txt, "AU_LOCAL_LIGHTS", 1) < 0.5 && g_voxState == 1) {
         PFN_glDeleteTextures deleteTextures = (PFN_glDeleteTextures)GetProcAddress(g_real, "glDeleteTextures");
         if (deleteTextures) {
             if (r_glBindImageTexture) {

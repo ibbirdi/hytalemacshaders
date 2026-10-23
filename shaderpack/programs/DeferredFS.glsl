@@ -38,6 +38,10 @@
 #elif AU_VOXEL_WORLD
 uniform int uHookPTPass;
 #endif
+#if AU_VOXEL_WORLD && AU_VOXEL_ATLAS
+uniform vec2 uHookVoxFeedOffset;    // the feed pass's pixel within each 4x4 block (hook vox_atlas_feed)
+layout(location = 2) out uvec4 auVoxFeed;
+#endif
 
 uniform sampler2D uColorTexture;
 uniform sampler2D uNormalTexture;
@@ -62,7 +66,7 @@ layout(location = 0) out vec4 outColor;
 // into its two half-size targets: the screen-space GI (rgb, visibility in alpha) and the light
 // shafts (rgb, distance in alpha). Pass 2, the full-size lighting, reads them back through an
 // upsample weighted by how close each half-size sample's distance is to the pixel's.
-#define AU_HALF_FX (AU_HALF_RES_FX && !AU_VOXEL_WORLD && !AU_GI_DENOISE)
+#define AU_HALF_FX (AU_HALF_RES_FX && !AU_GI_DENOISE && (!AU_VOXEL_WORLD || AU_VOXEL_ATLAS))
 #if AU_HALF_FX
 uniform int uHookHalfPass;
 uniform sampler2D uHookHalfGI;
@@ -217,6 +221,9 @@ void main()
 #endif
 
     vec2 texCoords = fragTexCoords;
+#if AU_VOXEL_WORLD && AU_VOXEL_ATLAS
+    if (uHookPTPass == 1) texCoords += uHookVoxFeedOffset;
+#endif
     float depth = texture(uDepthTexture, texCoords).r;
     if (depth >= 1.0) {
 #if AU_GI_DENOISE
@@ -261,12 +268,21 @@ void main()
 
     vec2 surfaceFootprint = AU_SurfaceFootprint(normal, gbuffer0.rgb);
     float dither = GetDither(gl_FragCoord.xy);
+#if AU_VOXEL_WORLD && AU_VOXEL_ATLAS
+    if (uHookPTPass == 1) {
+        uint feedMeta = uint(round(gbuffer0.a * 255.0));
+        bool ice = AU_MaterialClass(gbuffer0.a) == 1u && uint(round(AU_MaterialLevel(gbuffer0.a) * 7.0)) == 6u;
+        AU_VoxFeedAtlas(uDepthTexture, playerPos, normal, albedo, (feedMeta & AU_GBUFFER_PURE_GLOW) != 0u,
+                        !hasSSAO && !hasBloom, hasBloom, ice, outColor, auVoxFeed);
+        return;
+    }
+#endif
 #if AU_HALF_FX
     vec4 halfGI = vec4(0.0, 0.0, 0.0, 1.0);
     vec3 halfVL = vec3(0.0);
     if (uHookHalfPass == 1) {
         float halfDistance = length(playerPos);
-#if AU_PRESET >= 2
+#if AU_PRESET >= 2 && !AU_VOXELS
 #if AU_SSGI_SELF_HIT_FIX
         vec3 halfPlane = fastNormalFromPosition(playerPos);   // derivatives: outside the branch below
 #else
@@ -329,7 +345,7 @@ void main()
 #else
     vec3 historyNormal = normal;
 #endif
-#if AU_VOXELS
+#if AU_VOXELS && !AU_VOXEL_ATLAS
     if (uHookPTPass <= 1)
         AU_VoxFeed(playerPos, normal, albedo, subsurfaceMode != 0 || !hasSSAO, hasBloom, fract(dither * 7.31 + float(uHookFrame % 3600) * 0.137));
 #endif

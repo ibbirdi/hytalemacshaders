@@ -41,15 +41,15 @@ AU_EMISSION_STRENGTH | Emissive glow | range 0.0 6.0 0.25 | 3.0
 AU_EMISSIVE_BLOOM | Emissive bloom | range 0.0 20.0 0.5 | 4.0
 AU_NATIVE_EMISSION | Native glowing blocks | bool | 1 | Uses Hytale's item light definitions and tint variants, including luminous moss. Rebuild metadata after game updates.
 AU_NATIVE_EMISSION_STRENGTH | Native block glow | range 0.0 3.0 0.1 | 1.0
-AU_LOCAL_LIGHTS | Colored area lights | bool | 1 | Texture-colored light from native emitters and ores, with traced soft shadows in both shader presets and both GI modes.
-AU_LOCAL_LIGHT_STRENGTH | Area light intensity | range 0.0 3.0 0.1 | 1.0
-AU_EMISSIVE_LIGHT_STRENGTH | Coloured bulb / potion light | range 0.0 6.0 0.25 | 1.75 | Boosts nearby illumination from coloured emitter pixels without changing ore lighting, surface glow, or bloom. Multiplies area-light intensity.
-AU_LOCAL_LIGHT_COLOR_BLEND | Native fill colour correction | range 0.0 1.0 0.05 | 1.0 | Uses accumulated area-light colour to correct Hytale's broad warm/white fill near emitters. Preserves native fill brightness; zero restores the uncorrected native hue.
-AU_LIGHT_CACHE_SECONDS | Light cache duration (seconds) | range 0.1 5.0 0.1 | 1.0 | How long an unobserved emitter remains cached. Fades during the last quarter. Uses real time, independent of FPS; shorter values remove stale lights sooner but reduce off-screen retention.
-AU_LOCAL_LIGHT_RANGE | Area light reach | range 2.0 16.0 0.5 | 8.0
-AU_LOCAL_LIGHT_SOFTNESS | Area light size | range 0.0 0.8 0.05 | 0.35 | Larger sources cast softer shadows. Zero uses a point source.
-AU_LOCAL_LIGHT_CANDIDATES | Light sampling candidates | enum 4:4 8:8 16:16 | 8 | Candidate count for the fallback without spatial culling. Original and NVIDIA Ray Reconstruction automatically consider nearby lights in their spatial cell to avoid rare bright samples. RGB channels share shadow rays where possible, using one to three rays.
-AU_LOCAL_LIGHT_BUDGET | Area light budget | enum 16:16 32:32 64:64 128:128 | 32 | Most area lights evaluated per pixel. Where more reach a spot (a lava lake lists hundreds), a random share is evaluated each frame and the anti-aliasing averages it: lower is faster and grainier. Coloured light fog uses a quarter of it per step.
+?!apple AU_LOCAL_LIGHTS | Colored area lights | bool | 1 | Texture-colored light from native emitters and ores, with traced soft shadows in both shader presets and both GI modes.
+?!apple AU_LOCAL_LIGHT_STRENGTH | Area light intensity | range 0.0 3.0 0.1 | 1.0
+?!apple AU_EMISSIVE_LIGHT_STRENGTH | Coloured bulb / potion light | range 0.0 6.0 0.25 | 1.75 | Boosts nearby illumination from coloured emitter pixels without changing ore lighting, surface glow, or bloom. Multiplies area-light intensity.
+?!apple AU_LOCAL_LIGHT_COLOR_BLEND | Native fill colour correction | range 0.0 1.0 0.05 | 1.0 | Uses accumulated area-light colour to correct Hytale's broad warm/white fill near emitters. Preserves native fill brightness; zero restores the uncorrected native hue.
+?!apple AU_LIGHT_CACHE_SECONDS | Light cache duration (seconds) | range 0.1 5.0 0.1 | 1.0 | How long an unobserved emitter remains cached. Fades during the last quarter. Uses real time, independent of FPS; shorter values remove stale lights sooner but reduce off-screen retention.
+?!apple AU_LOCAL_LIGHT_RANGE | Area light reach | range 2.0 16.0 0.5 | 8.0
+?!apple AU_LOCAL_LIGHT_SOFTNESS | Area light size | range 0.0 0.8 0.05 | 0.35 | Larger sources cast softer shadows. Zero uses a point source.
+?!apple AU_LOCAL_LIGHT_CANDIDATES | Light sampling candidates | enum 4:4 8:8 16:16 | 8 | Candidate count for the fallback without spatial culling. Original and NVIDIA Ray Reconstruction automatically consider nearby lights in their spatial cell to avoid rare bright samples. RGB channels share shadow rays where possible, using one to three rays.
+?!apple AU_LOCAL_LIGHT_BUDGET | Area light budget | enum 16:16 32:32 64:64 128:128 | 32 | Most area lights evaluated per pixel. Where more reach a spot (a lava lake lists hundreds), a random share is evaluated each frame and the anti-aliasing averages it: lower is faster and grainier. Coloured light fog uses a quarter of it per step.
 AU_ORE_TORCH_RATIO | Ore light / torch ratio | range 0.0 1.0 0.05 | 0.3 | Ore light brightness relative to a torch, independent of surface glow and bloom.
 AU_SUBSURFACE | Foliage translucency | bool | 1
 AU_SSS | Subsurface scattering | bool | 1 | Coloured transmission through foliage and ice. Voxel mode measures material depth and accumulates scattering along a bounded ray; solid walls still block light.
@@ -106,13 +106,14 @@ AU_CLOTH_TRANSMIT | Sun through curtains / cloth | range 0.0 2.0 0.1 | 0.5
 AU_RTX_GI_STRENGTH | Bounce light | range 0.0 3.0 0.1 | 1.0
 AU_RTX_GI_AO | Ray-traced AO | range 0.0 1.0 0.05 | 0.55
 AU_RTX_GI_RAYS | Screen-space rays (no PT) | range 4 32 4 | 8
-AU_HALF_RES_FX | Half-resolution GI and light shafts | bool | 0 | Traces the screen-space GI and the light shafts at a quarter of the pixels and fills in the rest from the nearest samples on the same surface. A large saving at Retina and 4K sizes; the TAA hides the softer result. Not with GI denoising or path tracing.
+AU_HALF_RES_FX | Half-resolution GI and light shafts | bool | 0 | Traces the screen-space GI and the light shafts at a quarter of the pixels and fills in the rest from the nearest samples on the same surface. A large saving at Retina and 4K sizes; the TAA hides the softer result. With path tracing only the light shafts are halved. Not with GI denoising.
 AU_RTX_GI_RADIUS | Screen-space reach (no PT) | range 2.0 16.0 0.5 | 8.0
 AU_RTX_SSR_STEPS | Material reflection steps | range 8 64 4 | 32
 AU_SSR_REFINED | Refined reflections | bool | 1 | Pins every reflection hit to the surface (no stepping), rejects the backs of surfaces, fades uncertain hits to the sky, and blurs rough reflections more the further the reflected surface is. Off restores the previous reflections.
 
 @ Path tracing
-AU_PATH_TRACING | Path tracing | bool | 0 | Voxel GI. Choose Original or NVIDIA DLSS Ray Reconstruction in the GI denoising tab.
+?!apple AU_PATH_TRACING | Path tracing | bool | 0 | Voxel GI. Choose Original or NVIDIA DLSS Ray Reconstruction in the GI denoising tab.
+?apple AU_PATH_TRACING | Path tracing | bool | 0 | Voxel GI, traced through the hook's voxel atlas (no image load/store on macOS). macOS has no GI denoiser pass: the TAA averages the rays, and MetalFX's denoised scaler cleans them best.
 AU_PT_RAYS | Rays per pixel | range 1 8 1 | 3
 AU_PT_REACH | Ray reach | range 8.0 48.0 4.0 | 24.0
 AU_PT_SKY_LIGHT | Traced sky light | range 0.0 1.0 0.05 | 0.8
@@ -120,22 +121,22 @@ AU_PT_GI_STRENGTH | Bounce light (path tracing) | range 0.0 4.0 0.1 | 1.5
 AU_PT_AMBIENT_BOUNCE | Multi-bounce sky light | range 0.0 2.0 0.1 | 1.0
 AU_VOXEL_DEBUG | Voxel view | enum 0:Off 1:Voxels 2:Blend | 0
 
-@ GI denoising
-AU_GI_DENOISER | Denoiser | enum 1:Original 2:NVIDIA_DLSS_RR | 1 | Original is the built-in single-pass denoiser. NVIDIA uses DLSS Ray Reconstruction when DLSS is enabled and supported; Original remains the fallback until that backend is ready.
-AU_GI_HISTORY_TAPS | History samples | enum 1:1_tap 4:4_taps 9:9_taps | 9 | Original history-gather cost. Nine samples smooth sparse lighting most; fewer reduce GPU work.
-AU_GI_SPATIAL_STRENGTH | Spatial filter strength | range 0.0 1.0 0.05 | 1.0 | Amount of same-surface lighting sharing in Original. Zero preserves each pixel's current ray sample.
-AU_GI_NORMAL_THRESHOLD | Spatial normal tolerance | range 0.01 0.25 0.01 | 0.05 | Limits sharing between surfaces with different normals. Lower values preserve more edges.
-AU_GI_PLANE_TOLERANCE | History surface tolerance | range 0.005 0.1 0.005 | 0.03 | Maximum perpendicular history mismatch in blocks, plus a distance allowance. Lower values reject history more aggressively.
-AU_GI_HISTORY_REACH | History neighborhood reach | range 0.05 0.6 0.05 | 0.3 | Maximum history sample displacement in blocks, plus a distance allowance.
-AU_GI_MAX_HISTORY | Maximum history weight | range 0.0 0.97 0.01 | 0.92 | Caps previous-light retention independently of history length. Lower values reduce trails; zero uses only new lighting.
-AU_GI_LIGHT_REJECTION | Lighting-change rejection | range 0.05 1.0 0.05 | 0.25 | Rejects coherent lighting and colour changes, not individual noisy rays. Lower values respond more quickly to changing lights and shadows.
-AU_SSGI_DENOISE | Non-PT GI denoising | bool | 1 | Original accumulates in the existing lighting pass. Off frees its denoiser buffers.
-AU_PT_DENOISE | Path-traced GI denoising | bool | 1 | Filters path-traced lighting. Off keeps tracing and voxel synchronization, but removes denoiser buffers.
-AU_GI_SPATIAL_FILTER | Spatial lighting filter | bool | 1 | Shares same-surface lighting samples inside the existing lighting pass without blurring block textures.
-AU_GI_TEMPORAL_FILTER | Temporal lighting history | bool | 1 | Reprojects valid lighting history while moving and rejects disoccluded surfaces and changed lighting. Disabling releases four history textures, or six with traced direct lights enabled.
-AU_SSGI_HISTORY | History frames (non-PT) | range 1.0 63.0 1.0 | 8.0 | Non-PT GI history length. Lower values respond faster to moving coloured light.
-AU_PT_HISTORY | History frames (PT) | range 1.0 63.0 1.0 | 24.0 | PT history length. More frames reduce noise but respond more slowly to changing light.
-AU_SSGI_SELF_HIT_FIX | Non-PT GI self-hit correction | bool | 1
+?!apple @ GI denoising
+?!apple AU_GI_DENOISER | Denoiser | enum 1:Original 2:NVIDIA_DLSS_RR | 1 | Original is the built-in single-pass denoiser. NVIDIA uses DLSS Ray Reconstruction when DLSS is enabled and supported; Original remains the fallback until that backend is ready.
+?!apple AU_GI_HISTORY_TAPS | History samples | enum 1:1_tap 4:4_taps 9:9_taps | 9 | Original history-gather cost. Nine samples smooth sparse lighting most; fewer reduce GPU work.
+?!apple AU_GI_SPATIAL_STRENGTH | Spatial filter strength | range 0.0 1.0 0.05 | 1.0 | Amount of same-surface lighting sharing in Original. Zero preserves each pixel's current ray sample.
+?!apple AU_GI_NORMAL_THRESHOLD | Spatial normal tolerance | range 0.01 0.25 0.01 | 0.05 | Limits sharing between surfaces with different normals. Lower values preserve more edges.
+?!apple AU_GI_PLANE_TOLERANCE | History surface tolerance | range 0.005 0.1 0.005 | 0.03 | Maximum perpendicular history mismatch in blocks, plus a distance allowance. Lower values reject history more aggressively.
+?!apple AU_GI_HISTORY_REACH | History neighborhood reach | range 0.05 0.6 0.05 | 0.3 | Maximum history sample displacement in blocks, plus a distance allowance.
+?!apple AU_GI_MAX_HISTORY | Maximum history weight | range 0.0 0.97 0.01 | 0.92 | Caps previous-light retention independently of history length. Lower values reduce trails; zero uses only new lighting.
+?!apple AU_GI_LIGHT_REJECTION | Lighting-change rejection | range 0.05 1.0 0.05 | 0.25 | Rejects coherent lighting and colour changes, not individual noisy rays. Lower values respond more quickly to changing lights and shadows.
+?!apple AU_SSGI_DENOISE | Non-PT GI denoising | bool | 1 | Original accumulates in the existing lighting pass. Off frees its denoiser buffers.
+?!apple AU_PT_DENOISE | Path-traced GI denoising | bool | 1 | Filters path-traced lighting. Off keeps tracing and voxel synchronization, but removes denoiser buffers.
+?!apple AU_GI_SPATIAL_FILTER | Spatial lighting filter | bool | 1 | Shares same-surface lighting samples inside the existing lighting pass without blurring block textures.
+?!apple AU_GI_TEMPORAL_FILTER | Temporal lighting history | bool | 1 | Reprojects valid lighting history while moving and rejects disoccluded surfaces and changed lighting. Disabling releases four history textures, or six with traced direct lights enabled.
+?!apple AU_SSGI_HISTORY | History frames (non-PT) | range 1.0 63.0 1.0 | 8.0 | Non-PT GI history length. Lower values respond faster to moving coloured light.
+?!apple AU_PT_HISTORY | History frames (PT) | range 1.0 63.0 1.0 | 24.0 | PT history length. More frames reduce noise but respond more slowly to changing light.
+?!apple AU_SSGI_SELF_HIT_FIX | Non-PT GI self-hit correction | bool | 1
 
 @ Sky & atmosphere
 AU_ATMOSPHERE_MODEL | Atmosphere model | enum 0:Classic 1:Enhanced | 0 | Enhanced uses wavelength-dependent scattering for sky, distant haze, cloud ambience and reflection fallback. Does not change sunlight, surface ambient light, exposure or denoising. Biome & weather atmosphere takes priority.
@@ -179,10 +180,10 @@ AU_LIGHTSHAFT_SCENE_AWARE | Forest / cave beams | range 0.0 1.0 0.05 | 1.0
 AU_LIGHTSHAFT_SCENE_BOOST | Beam boost | range 0.0 3.0 0.1 | 1.0
 AU_LIGHTSHAFT_SUNSET_I | Sunrise / sunset haze | range 0.0 1.0 0.05 | 0.5
 AU_LIGHTSHAFT_NIGHT_I | Moonlight haze | range 0.0 1.0 0.05 | 0.35
-AU_LIGHT_FOG | Coloured light fog | bool | 0 | Requires Colored area lights. Torches, lanterns, glowing ores and coloured bulbs light the air around them in their own colour - a warm glow in a torch-lit cave, coloured haze around a bulb. Walls block it (checked against the voxel grid); a doorway lets a beam through. Removed lights leave no coloured air. Mostly visible in caves, interiors and at night.
-AU_LIGHT_FOG_DENSITY | Light fog density | range 0.1 4.0 0.1 | 1.0 | Requires Coloured light fog.
-AU_LIGHT_FOG_DISTANCE | Light fog range | range 8.0 64.0 4.0 | 24.0 | Requires Coloured light fog. How far from the camera glowing air is gathered.
-AU_LIGHT_FOG_SAMPLES | Light fog quality | enum 4:Low 6:Medium 8:High | 6 | Requires Coloured light fog. Steps along each view ray (one wall check per step).
+?!apple AU_LIGHT_FOG | Coloured light fog | bool | 0 | Requires Colored area lights. Torches, lanterns, glowing ores and coloured bulbs light the air around them in their own colour - a warm glow in a torch-lit cave, coloured haze around a bulb. Walls block it (checked against the voxel grid); a doorway lets a beam through. Removed lights leave no coloured air. Mostly visible in caves, interiors and at night.
+?!apple AU_LIGHT_FOG_DENSITY | Light fog density | range 0.1 4.0 0.1 | 1.0 | Requires Coloured light fog.
+?!apple AU_LIGHT_FOG_DISTANCE | Light fog range | range 8.0 64.0 4.0 | 24.0 | Requires Coloured light fog. How far from the camera glowing air is gathered.
+?!apple AU_LIGHT_FOG_SAMPLES | Light fog quality | enum 4:Low 6:Medium 8:High | 6 | Requires Coloured light fog. Steps along each view ray (one wall check per step).
 
 @ Water & glass
 AU_WATER | Shader water | bool | 1

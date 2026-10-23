@@ -10,6 +10,10 @@
 // (colour of what is on screen, air in front of visible block faces - this is what removes
 // broken blocks). The program file needs "#extension GL_ARB_shader_image_load_store : enable"
 // before anything else.
+//
+// Without image load/store (macOS's OpenGL 4.1, AU_VOXEL_ATLAS) the grid is two 2D textures the
+// shaders only read: z slices of 256x128 cells in a 16x16 tile atlas (4096x2048). DeferredFS's
+// feed pass (AU_VoxFeedAtlas) says what each pixel shows; the hook scatters that into the atlas.
 #ifndef AU_VOXEL_INC
 #define AU_VOXEL_INC
 
@@ -30,10 +34,28 @@
 #define AU_VOX_ICE 0x80u
 #define AU_VOX_GEOMETRY_FRAME_MASK 0xC000u
 
+#if AU_VOXEL_ATLAS
+uniform usampler2D auVoxGeoAtlas;
+uniform sampler2D auVoxColAtlas;
+#define AU_VOX_NONE 0xffffffffu
+
+// Atlas texel of a grid cell, packed (x | y << 16) for the hook's scatter pass.
+uint AU_VoxAtlasIndex(ivec3 cell)
+{
+    return uint((cell.z & 15) * 256 + cell.x) | (uint((cell.z >> 4) * 128 + cell.y) << 16);
+}
+
+ivec2 AU_VoxAtlasTexel(ivec3 cell)
+{
+    return ivec2((cell.z & 15) * 256 + cell.x, (cell.z >> 4) * 128 + cell.y);
+}
+#else
 layout(r32ui) uniform coherent uimage3D auVoxGeo;
 layout(rgba8) uniform image3D auVoxCol;
+#endif
 
-#ifdef AU_LIGHT_LIST_CACHED
+#if AU_VOXEL_ATLAS
+#elif defined(AU_LIGHT_LIST_CACHED)
 // Lighting only reads what earlier draws wrote (the hook puts a memory barrier between them), so
 // it reads through the cache: coherent loads bypass it on NVIDIA, and by a lava lake every pixel
 // reads the light list dozens of times.
@@ -95,6 +117,7 @@ uint AU_LightCacheClock()
 
 void AU_PublishFineEmitter(ivec3 block)
 {
+#if !AU_VOXEL_ATLAS
     ivec3 cell = block & AU_VOX_MASK;
     uint tag = AU_VoxTag(block) << 8;
     uint previous = imageAtomicAdd(auVoxGeo, cell, 0u);
@@ -106,11 +129,12 @@ void AU_PublishFineEmitter(ivec3 block)
         if (observed == previous) return;
         previous = observed;
     }
+#endif
 }
 
 void AU_RecordEmitterCached(vec3 worldPosition, vec3 radiance, bool fineSource, bool observedSource)
 {
-#if AU_LOCAL_LIGHTS || AU_PT_LIGHTS
+#if (AU_LOCAL_LIGHTS || AU_PT_LIGHTS) && !AU_VOXEL_ATLAS
     ivec3 block = ivec3(floor(worldPosition));
     if (max(radiance.r, max(radiance.g, radiance.b)) <= 0.001 || !AU_VoxInWindow(block, ivec3(floor(CameraPosition)))) return;
     ivec3 cell = block & AU_VOX_MASK;
@@ -222,14 +246,22 @@ void AU_RecordEmitter(ivec3 block, vec3 radiance)
 // Raw cell of block b, or 0 (unknown) when the cell belongs to another wrap.
 uint AU_VoxGet(ivec3 b)
 {
+#if AU_VOXEL_ATLAS
+    uint v = texelFetch(auVoxGeoAtlas, AU_VoxAtlasTexel(b & AU_VOX_MASK), 0).r;
+#else
     uint v = imageLoad(auVoxGeo, b & AU_VOX_MASK).r;
+#endif
     return ((v >> 8) & 63u) == AU_VoxTag(b) ? v : 0u;
 }
 
 // Albedo of block b; a = 0 when it was never seen on screen.
 vec4 AU_VoxGetColor(ivec3 b)
 {
+#if AU_VOXEL_ATLAS
+    vec4 c = texelFetch(auVoxColAtlas, AU_VoxAtlasTexel(b & AU_VOX_MASK), 0);
+#else
     vec4 c = imageLoad(auVoxCol, b & AU_VOX_MASK);
+#endif
     uint tag = uint(c.a * 255.0 + 0.5);
     return (tag & 64u) != 0u && (tag & 63u) == AU_VoxTag(b) ? vec4(c.rgb, 1.0) : vec4(0.0);
 }
@@ -288,6 +320,56 @@ bool AU_VoxTrace(vec3 origin, vec3 dir, float maxDist, int maxSteps, float rnd,
 // blend their albedo slowly into the block behind them (a steady average of its texture), and clear a full block standing right in
 // front of a visible block face - a face can only be seen when nothing solid is there, so
 // that block was broken.
+#if AU_VOXEL_ATLAS
+// DeferredFS's feed pass (uHookPTPass 1, the hook draws it at a quarter of the size, on a different
+// pixel of each 4x4 block every frame): what this terrain pixel shows, for the hook to scatter
+// into the atlas. cells.xy: the block behind the surface and its cell value; cells.zw: the block in
+// front of a full block's face when that block is clearly empty (broken blocks go); AU_VOX_NONE
+// when there is none. color: the surface's albedo for the block behind it (a 0: none).
+void AU_VoxFeedAtlas(sampler2D depthTex, vec3 playerPos, vec3 normal, vec3 albedo, bool terrain, bool foliage,
+                     bool emissive, bool ice, out vec4 color, out uvec4 cells)
+{
+    cells = uvec4(AU_VOX_NONE, 0u, AU_VOX_NONE, 0u);
+    color = vec4(0.0);
+    if (!terrain || dot(playerPos, playerPos) > 128.0 * 128.0) return;
+    ivec3 camBlock = ivec3(floor(CameraPosition));
+    vec3 wp = playerPos + CameraPosition;
+    vec3 an = abs(normal);
+    vec3 axis = step(vec3(0.99), an);
+    bool axisAligned = max(an.x, max(an.y, an.z)) > 0.99;
+    vec3 edge = abs(wp - round(wp));
+    // Only pixels well inside a face, as AU_VoxFeed. Cross-quad plants stay out of the grid.
+    if (axisAligned && dot(step(edge, vec3(0.08)), 1.0 - axis) > 0.0) return;
+    if (foliage && !axisAligned) return;
+    ivec3 inside = ivec3(floor(wp - normal * 0.08));
+    if (!AU_VoxInWindow(inside, camBlock)) return;
+    // Leaves (cut-out cubes) are porous; glowing blocks (torches, lava) let half the rays by,
+    // as the small models MapChunkVS finds by their vertices.
+    cells.x = AU_VoxAtlasIndex(inside & AU_VOX_MASK);
+    cells.y = (foliage ? AU_VOX_POROUS : AU_VOX_SOLID) | (AU_VoxTag(inside) << 8) | (emissive ? AU_VOX_SMALL : 0u)
+            | (ice ? AU_VOX_ICE : 0u);
+    if (!emissive) color = vec4(albedo, float(64u | AU_VoxTag(inside)) / 255.0);
+    if (foliage || emissive || !axisAligned || dot(playerPos, playerPos) > 32.0 * 32.0 || dot(edge, axis) > 0.04) return;
+    // The block in front of the face: air when its centre is clearly in front of what the screen
+    // shows there. The margin keeps slabs, stairs and other partial blocks that reach the centre.
+    ivec3 front = ivec3(floor(wp + normal * 0.5));
+    vec3 centre = vec3(front) + 0.5 - CameraPosition;
+    vec4 clip = ViewProjectionMatrix * vec4(centre, 1.0);
+    if (clip.w <= 0.0 || !AU_VoxInWindow(front, camBlock)) return;
+    vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return;
+    float sceneDepth = textureLod(depthTex, uv, 0.0).r;
+#if USE_LINEAR_Z
+    sceneDepth = sceneDepth >= 1.0 ? 1e9 : sceneDepth * FarClip;
+#else
+    sceneDepth = sceneDepth >= 1.0 ? 1e9 : GetLinearDepthFromDepthHW(sceneDepth, ProjectionMatrix);
+#endif
+    if (sceneDepth > -(ViewMatrix * vec4(centre, 1.0)).z + 0.45) {
+        cells.z = AU_VoxAtlasIndex(front & AU_VOX_MASK);
+        cells.w = AU_VOX_AIR | (AU_VoxTag(front) << 8);
+    }
+}
+#else
 void AU_VoxFeed(vec3 playerPos, vec3 normal, vec3 albedo, bool foliage, bool emissive, float rnd)
 {
     if (rnd > 0.1 || dot(playerPos, playerPos) > 128.0 * 128.0) return;
@@ -343,6 +425,7 @@ void AU_VoxFeed(vec3 playerPos, vec3 normal, vec3 albedo, bool foliage, bool emi
         }
     }
 }
+#endif
 
 vec3 auLocalLightUnshadowed = vec3(0.0);
 

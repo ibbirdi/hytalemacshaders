@@ -292,6 +292,53 @@ static int check_half_resolution_pair(int preset)
     return valid;
 }
 
+// DeferredFS with the atlas grid (path tracing or voxel scattering, with or without the
+// half-resolution effects), linked with ScreenVS: the hook's feed and grid uniforms stay active.
+static int check_atlas_deferred_pair(int tracing, int half)
+{
+    GLuint (APIENTRY *createProgram)(void) = (void *)real_wglGetProcAddress("glCreateProgram");
+    void (APIENTRY *deleteProgram)(GLuint) = (void *)real_wglGetProcAddress("glDeleteProgram");
+    void (APIENTRY *getProgramLog)(GLuint, GLsizei, GLsizei *, GLchar *) = (void *)real_wglGetProcAddress("glGetProgramInfoLog");
+    GLuint program = createProgram();
+    int valid = 1;
+    for (int stage = 0; stage < 2; stage++) {
+        char *source = shader_source(stage ? "DeferredFS" : "ScreenVS");
+        source = override_number(source, "AU_PATH_TRACING", tracing ? "1" : "0");
+        source = override_number(source, "AU_SSS_VOXEL", "1");
+        source = override_number(source, "AU_HALF_RES_FX", half ? "1" : "0");
+        source = override_number(source, "AU_PRESET", "2");
+        source = driver_source(source);
+        GLuint shader = r_glCreateShader(stage ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER);
+        const GLchar *pointer = source;
+        r_glShaderSource(shader, 1, &pointer, NULL); r_glCompileShader(shader);
+        GLint compiled = 0; r_glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+        if (!compiled) {
+            char message[8192] = {0}; r_glGetShaderInfoLog(shader, sizeof message, NULL, message);
+            fprintf(stderr, "FAIL atlas DeferredFS stage %d: %s\n", stage, message);
+            valid = 0;
+        }
+        r_glAttachShader(program, shader); r_glDeleteShader(shader); free(source);
+    }
+    GLint linked = 0;
+    if (valid) { r_glLinkProgram(program); r_glGetProgramiv(program, GL_LINK_STATUS, &linked); }
+    if (valid && !linked) {
+        char message[8192] = {0}; getProgramLog(program, sizeof message, NULL, message);
+        fprintf(stderr, "FAIL atlas DeferredFS link: %s\n", message);
+    }
+    const char *uniforms[] = {"uHookPTPass", "uHookVoxFeedOffset", "auVoxGeoAtlas", "auVoxColAtlas", "uHookHalfPass"};
+    int count = half ? 5 : 4;
+    valid = valid && linked;
+    for (int index = 0; index < count && valid; index++)
+        if (r_glGetUniformLocation(program, uniforms[index]) < 0) {
+            // Voxel scattering alone reads no colours.
+            if (!tracing && !strcmp(uniforms[index], "auVoxColAtlas")) continue;
+            fprintf(stderr, "FAIL atlas DeferredFS tracing=%d half=%d: %s inactive\n", tracing, half, uniforms[index]);
+            valid = 0;
+        }
+    deleteProgram(program);
+    return valid;
+}
+
 static int check_shadow_pair(int method, int shadow, int alpha, int textures)
 {
     GLuint (APIENTRY *createProgram)(void) = (void *)real_wglGetProcAddress("glCreateProgram");
@@ -398,6 +445,82 @@ static int check_half_draw(void)
     hgl.Disable(0x0C11);
     hgl.BindFramebuffer(0x8D40, 0);
     half_release();
+    return valid;
+}
+
+// The atlas voxel grid on this driver: a DeferredFS stand-in writes a known feed in pass 1 (a
+// solid block per feed texel, the air in front of it, a colour) and vox_atlas_feed must scatter it
+// to the right atlas texels: cells as written, colours blended in by a tenth per write.
+static int check_voxel_atlas(void)
+{
+    const char *vertex = "#version 410 core\nvoid main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));gl_Position=vec4(p*2.0-1.0,0.0,1.0);}";
+    const char *fragment = "#version 410 core\nuniform int uHookPTPass;uniform vec2 uHookVoxFeedOffset;\n"
+        "layout(location=0) out vec4 outColor;layout(location=2) out uvec4 auVoxFeed;\n"
+        "void main(){if(uHookPTPass!=1){outColor=vec4(1.0,0.0,1.0,1.0);return;}uint x=uint(gl_FragCoord.x+uHookVoxFeedOffset.x);"
+        "auVoxFeed=uvec4((256u+x)|(133u<<16),0x202u,(768u+x)|(9u<<16),0x101u);outColor=vec4(0.5,0.25,1.0,0.5);}";
+    GLuint (APIENTRY *createProgram)(void) = (void *)real_wglGetProcAddress("glCreateProgram");
+    void (APIENTRY *readPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *) = (void *)real_wglGetProcAddress("glReadPixels");
+    void (APIENTRY *readBuffer)(GLenum) = (void *)real_wglGetProcAddress("glReadBuffer");
+    GLenum (APIENTRY *getError)(void) = (void *)real_wglGetProcAddress("glGetError");
+    resolve_helpers();
+    if (!hook_gl_ready()) return 0;
+    GLuint program = createProgram();
+    const char *sources[2] = {vertex, fragment};
+    for (int stage = 0; stage < 2; stage++) {
+        GLuint shader = r_glCreateShader(stage ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER);
+        r_glShaderSource(shader, 1, &sources[stage], NULL); r_glCompileShader(shader);
+        r_glAttachShader(program, shader); r_glDeleteShader(shader);
+    }
+    r_glLinkProgram(program);
+    r_glUseProgram(program);
+    ProgRec record = {0};
+    record.locPTPass = r_glGetUniformLocation(program, "uHookPTPass");
+    record.locVoxFeed = r_glGetUniformLocation(program, "uHookVoxFeedOffset");
+    GLuint target, framebuffer;
+    hgl.GenTextures(1, &target);
+    r_glBindTexture(GL_TEXTURE_2D, target);
+    hgl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 64, 48, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    r_glBindTexture(GL_TEXTURE_2D, 0);
+    hgl.GenFramebuffers(1, &framebuffer);
+    hgl.BindFramebuffer(0x8D40, framebuffer);
+    hgl.FramebufferTexture2D(0x8D40, 0x8CE0, GL_TEXTURE_2D, target, 0);
+    hgl.Viewport(0, 0, 64, 48);
+    if (!vox_atlas_create()) { fprintf(stderr, "FAIL voxel atlas: not created\n"); return 0; }
+    g_voxAtlasMode = 1;
+    g_voxState = 1;
+    vox_atlas_feed(&record, 0x0004 /*TRIANGLES*/, 0, 3);
+    GLint boundFramebuffer = -1, currentProgram = -1;
+    r_glGetIntegerv(0x8CA6, &boundFramebuffer);
+    r_glGetIntegerv(GL_CURRENT_PROGRAM, &currentProgram);
+    GLuint solid[16] = {0}, air[16] = {0};
+    float colour[4] = {0};
+    hgl.BindFramebuffer(0x8CA8 /*READ_FRAMEBUFFER*/, g_voxAtlasFbo);
+    readBuffer(0x8CE0);
+    readPixels(256, 133, 16, 1, GL_RED_INTEGER, GL_UNSIGNED_INT, solid);
+    readPixels(768, 9, 16, 1, GL_RED_INTEGER, GL_UNSIGNED_INT, air);
+    readBuffer(0x8CE1);
+    readPixels(260, 133, 1, 1, GL_RGBA, GL_FLOAT, colour);
+    hgl.BindFramebuffer(0x8CA8, 0);
+    int valid = boundFramebuffer == (GLint)framebuffer && currentProgram == (GLint)program && g_voxFeedW == 16 && getError() == 0;
+    for (int x = 0; x < 16; x++) valid = valid && solid[x] == 0x202u && air[x] == 0x101u;
+    // The 12 feed rows all land on that texel: 12 blends of a tenth.
+    float blended = 1.0f - powf(0.9f, 12.0f);
+    valid = valid && fabsf(colour[0] - 0.5f * blended) < 0.01f && fabsf(colour[1] - 0.25f * blended) < 0.01f
+          && fabsf(colour[2] - blended) < 0.01f && fabsf(colour[3] - 0.5f) < 0.01f;
+    if (!valid) {
+        GLuint feed[4] = {0};
+        hgl.BindFramebuffer(0x8CA8, g_voxFeedFbo);
+        readBuffer(0x8CE2);
+        readPixels(3, 3, 1, 1, 0x8D99 /*RGBA_INTEGER*/, GL_UNSIGNED_INT, feed);
+        hgl.BindFramebuffer(0x8CA8, 0);
+        fprintf(stderr, "FAIL voxel atlas: cells %x %x, colour %.3f %.3f %.3f %.3f, framebuffer %d, program %d, scatter %u (failed %d), feed %dx%d %x %x %x %x\n",
+                solid[3], air[3], colour[0], colour[1], colour[2], colour[3], boundFramebuffer, currentProgram,
+                g_voxScatter, g_voxScatterFailed, g_voxFeedW, g_voxFeedH, feed[0], feed[1], feed[2], feed[3]);
+    }
+    hgl.BindFramebuffer(0x8D40, 0);
+    vox_atlas_release();
+    g_voxAtlasMode = 0;
+    g_voxState = 0;
     return valid;
 }
 
@@ -544,6 +667,7 @@ int main(int argumentCount, char **arguments)
     GET_GL(glUniform1f);
     int tested = 0, failures = 0;
     failures += !check_half_draw(); tested++;
+    failures += !check_voxel_atlas(); tested++;
 #if AU_HAS_METALFX
     failures += !check_metalfx_present(0); tested++;
     failures += !check_metalfx_present(1); tested++;
@@ -824,6 +948,10 @@ int main(int argumentCount, char **arguments)
     }
 #endif
     for (int preset = 1; preset <= 2; preset++) { failures += !check_half_resolution_pair(preset); tested += 2; }
+#ifdef __APPLE__
+    for (int tracing = 0; tracing < 2; tracing++)
+    for (int half = 0; half < 2; half++) { failures += !check_atlas_deferred_pair(tracing, half); tested += 2; }
+#endif
     for (int half = 0; half < 2; half++)
     for (int preset = 1; preset <= 2; preset++)
     for (int selfHit = 0; selfHit < 2; selfHit++)

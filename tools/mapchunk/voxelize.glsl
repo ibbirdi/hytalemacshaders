@@ -8,7 +8,7 @@
         ivec3 auBlock = ivec3(floor(uModelMatrix[3].xyz + CameraPosition + 0.5)) + auBlockPosition;
         if (AU_VoxInWindow(auBlock, ivec3(floor(CameraPosition))))
         {
-#if !ANIMATED
+#if !ANIMATED && !AU_VOXEL_ATLAS
             // A block with no vertex on a corner of its cell is a small model (torch, rock,
             // flower pot) the rays may pass; slabs, stairs and grass with overhangs all have
             // corner vertices and count as solid.

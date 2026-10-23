@@ -220,6 +220,7 @@
 #define AU_LOCAL_LIGHT_BUDGET 32       // most area lights evaluated per pixel; more reaching a spot are sampled
 #define AU_ORE_TORCH_RATIO 0.3
 #define AU_VOXEL_WORLD (AU_VOXELS || AU_LOCAL_LIGHTS || (AU_SSS && AU_SSS_VOXEL == 1))
+#define AU_VOXEL_ATLAS 0              // hook (macOS): the grid in 2D textures the hook writes, for OpenGL without image load/store
 
 // ---- Path tracing (RTX preset) -------------------------------------------------------
 // Voxel path tracing: the hook keeps a 256x128x256 block grid of the world around the
