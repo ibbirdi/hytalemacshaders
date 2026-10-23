@@ -546,6 +546,7 @@ typedef struct {
     GLint locEmissionReady;
     GLint locUpscale;        // uHookUpscale (BasicFS): set while it scales the finished frame to the window
     GLint locHalfPass;       // uHookHalfPass (DeferredFS with AU_HALF_RES_FX, see half_draw)
+    GLint locHalfHistory;    // uHookHalfHistory: last frame's half-size targets are bound
     GLint locMfxPass;        // uHookMfxPass (PostEffectFS with AU_METALFX, see the MetalFX dlss_draw)
     GLint locDlssResolve, locDlssViewport, locDlssSharpness;
     int shareGen, shareSrc;  // cached: is this program the source of a texture share
@@ -1754,8 +1755,8 @@ static void gi_draw(GLenum mode, GLint first, GLsizei count)
 #define HALF_UNIT_VL (HOOK_UNIT_BASE + 5)
 #define HALF_UNIT_SKY (HOOK_UNIT_BASE + 11)
 #define MFX_UNIT_OUTPUT (HOOK_UNIT_BASE + 6)   // MetalFX's output (a rectangle texture) for the resolve
-static GLuint g_halfFbo, g_halfTex[3];   // GI, light shafts, path-traced sky visibility
-static int g_halfW, g_halfH, g_halfFailed;
+static GLuint g_halfFbo[2], g_halfTex[2][3];   // two sets: GI, light shafts, sky visibility + history length
+static int g_halfW, g_halfH, g_halfFailed, g_halfCurrent, g_halfHistoryUsed, g_halfWrittenFrame = -100;
 
 static struct {
     void (APIENTRY *GenFramebuffers)(GLsizei, GLuint *);
@@ -1863,38 +1864,44 @@ static void hook_bind_unit(GLuint unit, GLuint texture)
 
 static void half_release(void)
 {
-    if (!g_halfTex[0]) return;
-    hook_bind_unit(HALF_UNIT_GI, 0);
-    hook_bind_unit(HALF_UNIT_VL, 0);
-    hook_bind_unit(HALF_UNIT_SKY, 0);
-    hgl.DeleteTextures(3, g_halfTex);
-    g_halfTex[0] = g_halfTex[1] = g_halfTex[2] = 0;
+    if (!g_halfTex[0][0]) return;
+    static const GLuint units[3] = {HALF_UNIT_GI, HALF_UNIT_VL, HALF_UNIT_SKY};
+    for (int i = 0; i < 3; i++) hook_bind_unit(units[i], 0);
+    hgl.DeleteTextures(6, &g_halfTex[0][0]);
+    memset(g_halfTex, 0, sizeof g_halfTex);
     g_halfW = g_halfH = 0;
+    g_halfWrittenFrame = -100;
 }
 
+// Two sets of half-size targets: this frame draws into one while pass 1 reads the other, last
+// frame's accumulated GI, for the temporal filter (uHookHalfHistory); they swap every frame.
 static int half_targets(int width, int height)
 {
     if (g_halfFailed || !hook_gl_ready()) return 0;
-    if (g_halfTex[0] && width == g_halfW && height == g_halfH) return 1;
+    if (g_halfTex[0][0] && width == g_halfW && height == g_halfH) return 1;
     half_release();
-    if (!g_halfFbo) hgl.GenFramebuffers(1, &g_halfFbo);
+    if (!g_halfFbo[0]) hgl.GenFramebuffers(2, g_halfFbo);
     GLint previousTexture = 0, previousFramebuffer = 0;
     r_glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
     r_glGetIntegerv(0x8CA6 /*GL_DRAW_FRAMEBUFFER_BINDING*/, &previousFramebuffer);
-    hgl.GenTextures(3, g_halfTex);
-    hgl.BindFramebuffer(0x8CA9 /*DRAW_FRAMEBUFFER*/, g_halfFbo);
-    for (int i = 0; i < 3; i++) {
-        r_glBindTexture(GL_TEXTURE_2D, g_halfTex[i]);
-        hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
-        if (i < 2) hgl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, NULL);
-        else hgl.TexImage2D(GL_TEXTURE_2D, 0, 0x822D /*R16F*/, width, height, 0, 0x1903 /*RED*/, GL_FLOAT, NULL);
-        hgl.FramebufferTexture2D(0x8CA9, 0x8CE0 /*COLOR_ATTACHMENT0*/ + i, GL_TEXTURE_2D, g_halfTex[i], 0);
+    hgl.GenTextures(6, &g_halfTex[0][0]);
+    GLenum status = 0x8CD5;
+    for (int set = 0; set < 2; set++) {
+        hgl.BindFramebuffer(0x8CA9 /*DRAW_FRAMEBUFFER*/, g_halfFbo[set]);
+        for (int i = 0; i < 3; i++) {
+            r_glBindTexture(GL_TEXTURE_2D, g_halfTex[set][i]);
+            hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+            if (i < 2) hgl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, NULL);
+            else hgl.TexImage2D(GL_TEXTURE_2D, 0, 0x822F /*RG16F*/, width, height, 0, 0x8227 /*RG*/, GL_FLOAT, NULL);
+            hgl.FramebufferTexture2D(0x8CA9, 0x8CE0 /*COLOR_ATTACHMENT0*/ + i, GL_TEXTURE_2D, g_halfTex[set][i], 0);
+        }
+        static const GLenum buffers[3] = {0x8CE0, 0x8CE1, 0x8CE2};   // COLOR_ATTACHMENT0-2
+        hgl.DrawBuffers(3, buffers);
+        GLenum setStatus = hgl.CheckFramebufferStatus(0x8CA9);
+        if (setStatus != 0x8CD5) status = setStatus;
     }
-    static const GLenum buffers[3] = {0x8CE0, 0x8CE1, 0x8CE2};   // COLOR_ATTACHMENT0-2
-    hgl.DrawBuffers(3, buffers);
-    GLenum status = hgl.CheckFramebufferStatus(0x8CA9);
     hgl.BindFramebuffer(0x8CA9, (GLuint)previousFramebuffer);
     r_glBindTexture(GL_TEXTURE_2D, (GLuint)previousTexture);
     if (status != 0x8CD5 /*FRAMEBUFFER_COMPLETE*/) {
@@ -1905,7 +1912,7 @@ static int half_targets(int width, int height)
     }
     g_halfW = width;
     g_halfH = height;
-    logf_("half resolution: GI and light shafts at %dx%d", width, height);
+    logf_("half resolution: GI and light shafts at %dx%d, with a temporal history", width, height);
     return 1;
 }
 
@@ -1920,18 +1927,30 @@ static void half_draw(ProgRec *program, GLenum mode, GLint first, GLsizei count)
         r_glDrawArrays(mode, first, count);
         return;
     }
+    // The other set is the history when it was drawn last frame (not after a pause or a resize);
+    // a second DeferredFS draw in the same frame reuses this frame's set.
+    int current = g_halfWrittenFrame == g_frame ? g_halfCurrent : g_halfCurrent ^ 1;
+    int history = g_halfWrittenFrame == g_frame - 1 || (g_halfWrittenFrame == g_frame && g_halfHistoryUsed);
     static const GLfloat clearGI[4] = {0.0f, 0.0f, 0.0f, 1.0f}, clearShafts[4] = {0.0f, 0.0f, 0.0f, 1e6f}, clearSky[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    // Pass 1 reads last frame's set through the same samplers pass 2 reads this frame's with.
+    hook_bind_unit(HALF_UNIT_GI, g_halfTex[current ^ 1][0]);
+    hook_bind_unit(HALF_UNIT_VL, g_halfTex[current ^ 1][1]);
+    hook_bind_unit(HALF_UNIT_SKY, g_halfTex[current ^ 1][2]);
+    if (program->locHalfHistory >= 0) r_glUniform1i(program->locHalfHistory, history);
     profile_use("Half-res GI + light shafts");
-    HookPassState state = hook_pass_begin(g_halfFbo, width, height);
+    HookPassState state = hook_pass_begin(g_halfFbo[current], width, height);
     hgl.ClearBufferfv(0x1800 /*COLOR*/, 0, clearGI);
     hgl.ClearBufferfv(0x1800 /*COLOR*/, 1, clearShafts);
     hgl.ClearBufferfv(0x1800 /*COLOR*/, 2, clearSky);
     r_glUniform1i(program->locHalfPass, 1);
     r_glDrawArrays(mode, first, count);
     hook_pass_end(&state);
-    hook_bind_unit(HALF_UNIT_GI, g_halfTex[0]);
-    hook_bind_unit(HALF_UNIT_VL, g_halfTex[1]);
-    hook_bind_unit(HALF_UNIT_SKY, g_halfTex[2]);
+    g_halfHistoryUsed = history;
+    g_halfWrittenFrame = g_frame;
+    g_halfCurrent = current;
+    hook_bind_unit(HALF_UNIT_GI, g_halfTex[current][0]);
+    hook_bind_unit(HALF_UNIT_VL, g_halfTex[current][1]);
+    hook_bind_unit(HALF_UNIT_SKY, g_halfTex[current][2]);
     profile_use(program->pname);
     r_glUniform1i(program->locHalfPass, 2);
     r_glDrawArrays(mode, first, count);
@@ -3393,6 +3412,7 @@ static void check_extras(GLuint prog, ProgRec *p)
         if (gi >= 0) r_glUniform1i(gi, HALF_UNIT_GI);
         if (shafts >= 0) r_glUniform1i(shafts, HALF_UNIT_VL);
         if (sky >= 0) r_glUniform1i(sky, HALF_UNIT_SKY);
+        p->locHalfHistory = r_glGetUniformLocation(prog, "uHookHalfHistory");
         r_glUniform1i(p->locHalfPass, 0);
         p->hasExtras = 1;
     }

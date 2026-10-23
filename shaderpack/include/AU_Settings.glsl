@@ -182,6 +182,7 @@
 
 // ---- RTX preset ----------------------------------------------------------------------
 #define AU_HALF_RES_FX 0              // hook: screen-space GI and light shafts at half resolution, upsampled by depth
+#define AU_HALF_HISTORY 16            // hook: frames the half-resolution GI accumulates (its denoiser; 1 = off)
 #define AU_RTX_GI_RAYS 8
 #define AU_RTX_GI_RADIUS 8.0
 #define AU_RTX_GI_STRENGTH 1.0
@@ -221,7 +222,7 @@
 #define AU_ORE_TORCH_RATIO 0.3
 #define AU_DYNAMIC_SHADOWS 1          // torches in hand, lanterns and other moving lights cast shadows (LightClusteredFS)
 #define AU_DYNAMIC_LIGHT_FACING 0.8   // how much those lights follow the way a surface faces them (0 = Hytale's flat light)
-#define AU_DYNAMIC_LIGHT_SIZE 1.0     // size of those lights: softer shadows when larger
+#define AU_DYNAMIC_LIGHT_SIZE 0.6     // size of those lights: softer shadows when larger
 #define AU_VOXEL_WORLD (AU_VOXELS || AU_LOCAL_LIGHTS || (AU_SSS && AU_SSS_VOXEL == 1) || AU_DYNAMIC_SHADOWS)
 #define AU_VOXEL_ATLAS 0              // hook (macOS): the grid in 2D textures the hook writes, for OpenGL without image load/store
 

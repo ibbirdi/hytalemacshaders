@@ -71,29 +71,65 @@ layout(location = 0) out vec4 outColor;
 uniform int uHookHalfPass;
 uniform sampler2D uHookHalfGI;
 uniform sampler2D uHookHalfVL;
+uniform sampler2D uHookHalfSky;     // path tracing's sky visibility (r) and the GI's history length (g)
 layout(location = 1) out vec4 auHalfVL;
-#if AU_VOXELS
-uniform sampler2D uHookHalfSky;     // path tracing: the share of rays that reached the sky
 layout(location = 2) out vec4 auHalfSky;
-#endif
 
+// The GI's denoiser here (macOS has no image load/store for AU_GI_DENOISE): the hook keeps last
+// frame's half-size targets and binds them to the samplers above during pass 1 (uHookHalfHistory:
+// they hold last frame), and this frame's for pass 2. Pass 1 blends its new, noisy GI into them
+// where the surface was last frame, up to AU_HALF_HISTORY frames. History whose distance does
+// not match (disocclusion, a moved block) is dropped. (Apple allows 16 samplers per shader.)
+uniform int uHookHalfHistory;
+
+float AU_HalfAccumulate(vec3 playerPos, inout vec4 gi, inout float sky)
+{
+    if (uHookHalfHistory == 0 || uHookHistoryValid == 0 || AU_HALF_HISTORY < 1.5) return 1.0;
+    ivec2 size = textureSize(uHookHalfGI, 0);
+    vec2 position = AU_PreviousUV(playerPos, false) * vec2(size) - 0.5;
+    if (any(lessThan(position, vec2(-0.5))) || any(greaterThan(position, vec2(size) - 0.5))) return 1.0;
+    float expected = length(playerPos + CameraPosition - uHookPreviousCamera);
+    ivec2 base = ivec2(floor(position));
+    vec2 f = position - vec2(base);
+    vec4 giSum = vec4(0.0);
+    vec2 skySum = vec2(0.0);
+    float total = 0.0;
+    for (int i = 0; i < 4; i++) {
+        ivec2 offset = ivec2(i & 1, i >> 1);
+        ivec2 texel = clamp(base + offset, ivec2(0), size - 1);
+        if (abs(texelFetch(uHookHalfVL, texel, 0).a - expected) > expected * 0.03 + 0.08) continue;
+        float weight = (offset.x == 1 ? f.x : 1.0 - f.x) * (offset.y == 1 ? f.y : 1.0 - f.y);
+        giSum += texelFetch(uHookHalfGI, texel, 0) * weight;
+        skySum += texelFetch(uHookHalfSky, texel, 0).rg * weight;
+        total += weight;
+    }
+    if (total < 0.25) return 1.0;
+    vec4 historyGI = giSum / total;
+    vec2 historySky = skySum / total;
+    float frames = min(floor(historySky.y + 0.5) + 1.0, AU_HALF_HISTORY);
+    gi = mix(historyGI, gi, 1.0 / frames);
+    sky = mix(historySky.x, sky, 1.0 / frames);
+    return frames;
+}
+
+// Back to full size: the 3x3 half-size texels around the pixel, by distance on screen and how
+// close each one's distance is to the pixel's (an edge-aware blur that also spreads the noise).
 void AU_HalfUpsample(vec2 uv, float distance, out vec4 gi, out vec3 vl, out float sky)
 {
     ivec2 size = textureSize(uHookHalfVL, 0);
     vec2 position = uv * vec2(size) - 0.5;
-    ivec2 base = ivec2(floor(position));
-    vec2 f = position - vec2(base);
+    ivec2 centre = ivec2(floor(position + 0.5));
     vec4 giSum = vec4(0.0);
     vec3 vlSum = vec3(0.0);
     float skySum = 0.0, total = 0.0, closest = 1e9;
     sky = 1.0;
-    ivec2 best = clamp(base, ivec2(0), size - 1);
-    for (int i = 0; i < 4; i++) {
-        ivec2 offset = ivec2(i & 1, i >> 1);
-        ivec2 texel = clamp(base + offset, ivec2(0), size - 1);
+    ivec2 best = clamp(centre, ivec2(0), size - 1);
+    for (int i = 0; i < 9; i++) {
+        ivec2 texel = clamp(centre + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), size - 1);
+        vec2 away = vec2(texel) - position;
         vec4 shafts = texelFetch(uHookHalfVL, texel, 0);
         float difference = abs(shafts.a - distance) / max(distance, 0.5);
-        float weight = (offset.x == 1 ? f.x : 1.0 - f.x) * (offset.y == 1 ? f.y : 1.0 - f.y) * exp(-difference * 40.0);
+        float weight = exp(-dot(away, away) * 0.9) * exp(-difference * 40.0);
         if (difference < closest) { closest = difference; best = texel; }
         giSum += texelFetch(uHookHalfGI, texel, 0) * weight;
         vlSum += shafts.rgb * weight;
@@ -300,7 +336,6 @@ void main()
 #if AU_VOXELS
         // Path tracing on a quarter of the pixels: the costliest part of the lighting.
         if (!hasBloom) halfGI.rgb = AU_GetVoxelGI(uDepthTexture, playerPos, normal, skyLight, halfGI.a, halfSky);
-        auHalfSky = vec4(halfSky);
 #elif AU_PRESET >= 2
 #if AU_SSGI_SELF_HIT_FIX
         vec3 halfPlane = fastNormalFromPosition(playerPos);   // derivatives: outside the branch below
@@ -309,6 +344,8 @@ void main()
 #endif
         if (!hasBloom) halfGI.rgb = AU_GetSSGI(uDepthTexture, playerPos, normal, halfPlane, dither, halfGI.a);
 #endif
+        float halfFrames = AU_HalfAccumulate(playerPos, halfGI, halfSky);
+        auHalfSky = vec4(halfSky, halfFrames, 0.0, 0.0);
         if (IsCameraUnderwater > 0.5) lightColor *= vec3(0.45, 0.75, 1.25);   // as below
         outColor = halfGI;
         auHalfVL = vec4(GetVolumetricLight(playerPos / max(halfDistance, 0.0001), halfDistance, false, dither), halfDistance);
