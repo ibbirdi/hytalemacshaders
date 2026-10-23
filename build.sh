@@ -14,7 +14,7 @@ if [[ $(uname -s) == Darwin ]]; then
     # MetalFX bridge (hook/aud_metalfx.m). The game supports macOS 12; MetalFX (13) is weak-linked.
     cc -arch arm64 -mmacosx-version-min=12.0 -fobjc-arc -O2 -Wall -Wextra -Wno-unused-parameter \
         -c "$root/hook/aud_metalfx.m" -o "$stage/aud_metalfx.o"
-    cc -arch arm64 -mmacosx-version-min=12.0 -std=gnu11 -O2 -dynamiclib -Wall -Wextra -Wno-unused-function -Wno-unused-parameter \
+    cc -arch arm64 -mmacosx-version-min=12.0 -std=gnu11 -O2 -dynamiclib -Wall -Wextra -Wno-unused-function -Wno-unused-parameter -Wno-unused-variable \
         -Wno-missing-field-initializers -DAU_SDL_PROXY=1 -DAU_HAS_DLSS=0 -DAU_HAS_METALFX=1 \
         "$root/hook/hook.c" "$stage/aud_metalfx.o" \
         -framework Foundation -framework Metal -weak_framework MetalFX -framework IOSurface -framework OpenGL \
