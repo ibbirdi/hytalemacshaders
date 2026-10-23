@@ -49,6 +49,13 @@ int amf_evaluate(float jitterX, float jitterY, float motionScaleX, float motionS
 // World-to-view and view-to-clip matrices (column major, OpenGL conventions) for the denoiser.
 void amf_set_camera(const float *worldToView, const float *viewToClip);
 
+// Diagnostics for hook.log: the mean time amf_evaluate waited on the GPU since the last call (ms),
+// the Mac's thermal state (0 nominal, 1 fair, 2 serious, 3 critical: the system slows the GPU) and
+// the game's memory footprint (MB).
+double amf_take_wait_ms(void);
+int amf_thermal_state(void);
+int amf_memory_mb(void);
+
 void amf_shutdown(void);
 
 #endif

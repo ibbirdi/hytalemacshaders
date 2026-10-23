@@ -986,7 +986,7 @@ int main(int argumentCount, char **arguments)
         }
         GLint linked = 0;
         if (compiledStages == 2) { r_glLinkProgram(program); r_glGetProgramiv(program, GL_LINK_STATUS, &linked); }
-        int valid = linked && r_glGetUniformLocation(program, "uHookGBuffer1") >= 0 && r_glGetUniformLocation(program, "uHookFrame") >= 0
+        int valid = linked && r_glGetUniformLocation(program, "uHookGBuffer1") >= 0
                  && r_glGetUniformLocation(program, "auVoxGeoAtlas") >= 0 && r_glGetUniformLocation(program, "uLightGridTexture") >= 0;
         if (!valid) {
             char message[4096] = {0};

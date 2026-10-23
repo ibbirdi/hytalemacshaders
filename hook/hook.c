@@ -3554,7 +3554,13 @@ static void profile_frame_marker(void)
     g_fpsFrames++;
     double secs = (double)(now.QuadPart - g_fpsT0.QuadPart) / (double)g_freq.QuadPart;
     if (secs >= 10.0) {
+#if AU_HAS_METALFX
+        // Where a slowdown comes from: the GPU work MetalFX waits for, the Mac's heat, memory growth.
+        logf_("fps %.1f (%.2f ms), MetalFX wait %.2f ms, thermal state %d, memory %d MB", g_fpsFrames / secs,
+              secs * 1000.0 / g_fpsFrames, amf_take_wait_ms(), amf_thermal_state(), amf_memory_mb());
+#else
         logf_("fps %.1f (%.2f ms)", g_fpsFrames / secs, secs * 1000.0 / g_fpsFrames);
+#endif
         g_fpsFrames = 0;
         g_fpsT0 = now;
     }

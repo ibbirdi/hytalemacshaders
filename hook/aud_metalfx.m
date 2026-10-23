@@ -17,6 +17,8 @@
 #import <IOSurface/IOSurface.h>
 #import <OpenGL/OpenGL.h>
 #import <OpenGL/gl3.h>
+#include <mach/mach.h>
+#include <time.h>
 #include "aud_metalfx.h"
 
 static AmfLogFn amf_log;
@@ -32,6 +34,8 @@ static IOSurfaceRef g_surfaces[AMF_TEX_COUNT];
 static id<MTLTexture> g_textures[AMF_TEX_COUNT];
 static GLuint g_gl[AMF_TEX_COUNT];
 static simd_float4x4 g_worldToView, g_viewToClip;
+static double g_waitTotal;
+static int g_waitCount;
 
 static const struct {
     MTLPixelFormat metal;
@@ -366,12 +370,37 @@ int amf_evaluate(float jitterX, float jitterY, float motionScaleX, float motionS
         // The first frames after a configure also build the scaler's GPU programs: a timeout
         // there is no reason to give up.
         uint64_t timeout = g_framesSinceConfigure++ < 4 ? 30000 : 2000;
-        if (![g_event waitUntilSignaledValue:value timeoutMS:timeout]) {
+        uint64_t start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        BOOL signalled = [g_event waitUntilSignaledValue:value timeoutMS:timeout];
+        g_waitTotal += (double)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start) / 1e6;
+        g_waitCount++;
+        if (!signalled) {
             amf_log("metalfx: the GPU did not finish within %llu ms", (unsigned long long)timeout);
             return 0;
         }
     }
     return 1;
+}
+
+double amf_take_wait_ms(void)
+{
+    double mean = g_waitCount ? g_waitTotal / g_waitCount : 0.0;
+    g_waitTotal = 0.0;
+    g_waitCount = 0;
+    return mean;
+}
+
+int amf_thermal_state(void)
+{
+    return (int)[[NSProcessInfo processInfo] thermalState];
+}
+
+int amf_memory_mb(void)
+{
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) return -1;
+    return (int)(info.phys_footprint / (1024 * 1024));
 }
 
 void amf_shutdown(void)

@@ -4,9 +4,9 @@
 // Hytale lights each pixel from the point lights of its cluster grid (a torch in the hand,
 // lanterns, glowing items and projectiles) by distance alone, through walls. With
 // AU_DYNAMIC_SHADOWS each light also faces the surface (N.L from the G-buffer normal the hook
-// shares) and is blocked by the terrain between them: one shadow ray per light through the voxel
-// grid (AU_Voxel.glsl), aimed at a random point of a light-sized ball so the TAA averages it into
-// a soft shadow. Players and mobs are not in the grid and cast none.
+// shares) and is blocked by the terrain between them: shadow rays per light through the voxel
+// grid (AU_Voxel.glsl), four to fixed points around a light with a size for a soft penumbra that
+// stays still. Players and mobs are not in the grid and cast none.
 
 #include "Deferred_inc.glsl"
 #include "Reconstruction_inc.glsl"
@@ -31,7 +31,7 @@ uniform vec3 uZSlicesParams;
 uniform sampler2D uHookGBuffer1;   // G-buffer normal (encoded), shared by the hook
 #endif
 #if AU_DYNAMIC_SHADOW_RAYS
-uniform int uHookFrame;
+uniform int uHookFrame;   // AU_Voxel.glsl's feed (other platforms) reads it
 #include "AU_Voxel.glsl"
 #endif
 
@@ -43,25 +43,29 @@ layout(location = 0) out vec3 outColor;
 const float DynamicLightMultiplier = 3.0;
 
 #if AU_DYNAMIC_SHADOW_RAYS
-float AU_DynamicHash(vec3 p)
+// How much of the light reaches the surface past the grid's blocks: rays to the light's centre, or
+// with a size to four fixed points around it (a soft, still penumbra; random points per frame
+// flickered). Leaves and small models stop a ray by their block, the same every frame. The
+// light's own block is never tested.
+float AU_DynamicLightShadow(vec3 originWS, vec3 lightWS)
 {
-    p = fract(p * vec3(0.1031, 0.1030, 0.0973));
-    p += dot(p, p.yxz + 33.33);
-    return fract((p.x + p.y) * p.z);
-}
-
-// 1 when nothing in the grid stands between the surface and a point of the light, 0 otherwise
-// (leaves and small models let part of the rays by). The light's own block is never tested.
-float AU_DynamicLightShadow(vec3 originWS, vec3 lightWS, vec2 noise)
-{
-    float phi = noise.y * 6.2831853, cosTheta = noise.x * 2.0 - 1.0;
-    vec3 offset = vec3(sqrt(1.0 - cosTheta * cosTheta) * vec2(cos(phi), sin(phi)), cosTheta) * (0.2 * AU_DYNAMIC_LIGHT_SIZE);
-    vec3 toLight = lightWS + offset - originWS;
-    float length2 = dot(toLight, toLight);
-    if (length2 < 0.6 * 0.6) return 1.0;
-    float distanceToLight = sqrt(length2);
-    ivec3 block; vec3 normal; float t; uint cell;
-    return AU_VoxTrace(originWS, toLight / distanceToLight, distanceToLight - 0.55, 48, noise.x, block, normal, t, cell) ? 0.0 : 1.0;
+    vec3 toLight = lightWS - originWS;
+    float distanceToLight = length(toLight);
+    if (distanceToLight < 0.6) return 1.0;
+    vec3 direction = toLight / distanceToLight;
+    vec3 side = normalize(cross(direction, abs(direction.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+    vec3 up = cross(side, direction);
+    float radius = 0.2 * AU_DYNAMIC_LIGHT_SIZE;
+    int rays = radius > 0.01 ? 4 : 1;
+    float lit = 0.0;
+    for (int ray = 0; ray < rays; ray++) {
+        vec3 offset = rays == 1 ? vec3(0.0) : (ray < 2 ? side : up) * (ray % 2 == 0 ? radius : -radius);
+        vec3 target = lightWS + offset - originWS;
+        float targetDistance = length(target);
+        ivec3 block; vec3 normal; float t; uint cell;
+        if (!AU_VoxTrace(originWS, target / targetDistance, targetDistance - 0.55, 48, 0.5, block, normal, t, cell)) lit += 1.0;
+    }
+    return lit / float(rays);
 }
 #endif
 
@@ -92,8 +96,6 @@ void main()
 #if AU_DYNAMIC_SHADOW_RAYS
     mat3 viewToWorld = mat3(InvViewMatrix);
     vec3 originWS = viewToWorld * (positionVS + normalVS * 0.05) + CameraPosition;
-    vec2 noise = vec2(AU_DynamicHash(vec3(gl_FragCoord.xy, float(uHookFrame % 1024))),
-                      AU_DynamicHash(vec3(gl_FragCoord.yx + 17.0, float(uHookFrame % 1024) + 0.5)));
 #endif
 
     // Hytale's falloff per channel (each channel's value is its reach), the brightest light wins.
@@ -114,7 +116,7 @@ void main()
 #endif
 #if AU_DYNAMIC_SHADOW_RAYS
         if (max(light.r, max(light.g, light.b)) > 0.002)
-            light *= AU_DynamicLightShadow(originWS, viewToWorld * lightPosSize.xyz + CameraPosition, noise);
+            light *= AU_DynamicLightShadow(originWS, viewToWorld * lightPosSize.xyz + CameraPosition);
 #endif
         dynamicLightColor = max(dynamicLightColor, light);
     }
