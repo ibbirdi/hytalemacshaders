@@ -2,7 +2,12 @@
 
 ## Unreleased
 
-- Added macOS support on Apple Silicon. `./install.sh` builds the SDL3 hook for the native client, installs it inside `Hytale.app` and re-signs the app so the game can load it; `./install.sh --uninstall` restores Hypixel's signature. Colored area lights, Coloured light fog, Path tracing, voxel scattering, GI denoising and DLSS stay off on macOS, whose OpenGL 4.1 has no image load/store. See [macOS notes](docs/macos.md).
+- Added macOS support on Apple Silicon. `./install.sh` builds the SDL3 hook for the native client, installs it inside `Hytale.app` and re-signs the app so the game can load it; `./install.sh --uninstall` restores Hypixel's signature. Colored area lights, Coloured light fog, GI denoising and DLSS stay off on macOS, whose OpenGL 4.1 has no image load/store. See [macOS notes](docs/macos.md).
+- Added **MetalFX upscaling** on macOS, Apple's counterpart of DLSS: the scene renders at the **Render resolution** set in the new Apple MetalFX tab and MetalFX rebuilds the window from several frames. From macOS 26 the **Denoised scaler** (MetalFX's ray reconstruction) is available too, and MetalFX can submit through Metal 4. New macOS installations start at 67 percent.
+- Path tracing and the voxel scattering method work on macOS: without image load/store the voxel grid lives in a texture atlas the hook fills from what the screen shows.
+- Added **Half-resolution GI and light shafts**: the screen-space GI rays and the light shafts run on a quarter of the pixels and are upsampled along surfaces. On by default on macOS.
+- Added **Sub-pixel jitter** for the TAA without an upscaler, so it resolves edges as well as noise (on by default on macOS), and a bicubic, sharpened scale-to-window for Hytale's Render Scale below 100 percent (**Upscale sharpness**).
+- Saving a setting from the menu no longer reloads the shaders twice. The hook also sends fewer redundant GL calls per draw.
 - The Linux hook now advances its frame counter every frame, as the Windows hook does. Before, temporal reprojection kept the first frame's camera and `uHookFrame` stayed at 0.
 
 ## 1.5.2

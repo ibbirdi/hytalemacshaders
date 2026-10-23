@@ -36,13 +36,43 @@ the executable alone and an update of the whole bundle. The same round trip on a
 
 ## What stays off
 
-`GL_ARB_shader_image_load_store` is not among the 43 extensions of macOS's OpenGL 4.1, so
-everything the pack writes through images stays off: the voxel grid behind **Colored area
-lights**, **Coloured light fog**, **Path tracing** and the voxel **Scattering method**, the
-history of the Original GI denoiser, and DLSS. On macOS the hook appends `#define`s after
-`AU_Settings.glsl`, as it already does for DLSS, so profiles and menu changes cannot turn them
-back on. Voxel scattering falls back to the surface approximation; screen-space GI still runs,
-smoothed by TAA alone.
+`GL_ARB_shader_image_load_store` is not among the 43 extensions of macOS's OpenGL 4.1. The light
+list behind **Colored area lights** and **Coloured light fog** is a lock-free hash table built on
+image atomics, and the Original GI denoiser keeps its history in images: those stay off (the hook
+appends `#define`s after `AU_Settings.glsl`, and the macOS menu hides their options). DLSS is
+NVIDIA-only; MetalFX takes its place.
+
+## Voxel grid without image load/store
+
+Path tracing and the voxel **Scattering method** read a 256x128x256 block grid. On macOS
+(`AU_VOXEL_ATLAS`) it lives in two 2D textures, z slices in a 16x16 tile atlas (4096x2048, R32UI
+cells and RGBA8 colours), which the shaders read with `texelFetch`. DeferredFS's pass 1 runs at a
+quarter of the size, on another pixel of each 4x4 block every frame, and writes what each terrain
+pixel shows (`AU_VoxFeedAtlas`): the block behind the surface, a block in front of a face whose
+centre is clearly empty (broken blocks go), the surface's colour. The hook scatters one point per
+feed texel into the atlas (`vox_atlas_feed`). Only terrain pixels count (the G-buffer bit
+MapChunkFS sets), so mobs leave no trails.
+
+## MetalFX
+
+`hook/aud_metalfx.m` replaces DLSS. PostEffectFS draws a second time into IOSurfaces (colour
+before exposure, depth, motion, a reactive mask; with the **Denoised scaler** also albedo,
+specular, normals and roughness), which OpenGL sees as rectangle textures and Metal as textures.
+After `glFlush` MetalFX upscales them; OpenGL cannot wait for Metal on the GPU, so the hook waits
+on a shared event, then PostEffectFS's resolve mode tonemaps the result onto the window.
+**Render resolution** uses the SDL pixel-size hook, so the UI keeps full resolution.
+
+`tools/macos_test/metalfx_test.sh` runs the bridge on the GPU. A jittered sharp edge converges
+only with the right jitter and motion signs; on an M5 Pro the right ones give 1.2 px wide edges
+and the wrong ones 3-4 px. It also times the scalers at 2755x1686 -> 4112x2516: 3.9 ms for the
+temporal scaler (4.3 ms through Metal 4), 22 ms for the denoised one (14 ms from 50 percent).
+The original queue measured faster than Metal 4, so **Submit through Metal 4** is off by default.
+
+## Performance on Apple Silicon
+
+New installations (and the built-in profiles on macOS) start with MetalFX at 67 percent,
+**Sub-pixel jitter** for the TAA, **Half-resolution GI and light shafts**, and capped per-pixel
+sample counts (GI rays 4, light shafts 16, shadow samples 16, distant shadow steps 24).
 
 ## Apple's OpenGL
 
@@ -71,7 +101,8 @@ at 0. `SDL_GL_SwapWindow` now advances the counter.
 
 ## Other differences
 
-- Shader hot reload polls `programs/` and `include/` twice a second instead of using inotify.
+- Shader hot reload polls `programs/` and `include/` twice a second on a background thread
+  instead of using inotify; a menu save reloads once.
 - The menu draws with Homebrew's cairo, linked weakly: without cairo the game still starts, and
   only the menu is missing.
 - Mac keyboards have no Home or Pause key. **fn+Left** sends Home and opens the menu, and
@@ -89,10 +120,17 @@ profile ran at 37-48 fps in a river scene where vanilla ran at 79 fps.
   reload while playing.
 - `tools/macos_test/test_install.py`, and `tools/linux_test` run on macOS with `sys.platform` set
   to `linux`.
+- `tools/macos_test/shader_test.sh`: every shader variant compiled by Apple's GLSL compiler in a
+  headless OpenGL 4.1 context, plus the hook's half-resolution draw, its MetalFX present and the
+  voxel atlas scatter run on the driver.
+- `tools/macos_test/metalfx_test.sh`: the MetalFX bridge on the GPU (see MetalFX).
 - The Linux branches of the hook pass a syntax check against stub Linux headers. They have not
   been built or run on Linux.
 
 ## Not tested
+
+- MetalFX, half-resolution effects and the voxel atlas in the game itself: the tests run the
+  hook's code on the driver, not inside Hytale.
 
 - Intel Macs (the installer accepts arm64 only), other macOS versions and other Hytale versions.
 - How the launcher's updates and repairs treat the re-signed bundle over time.

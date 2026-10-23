@@ -122,10 +122,10 @@ the same developer. The installer therefore re-signs `Hytale.app` ad hoc without
 runtime, keeping its identifier and entitlements. Hypixel's signed executable and seal are saved
 first, and uninstalling puts them back, so the game ends up byte-for-byte as it was.
 
-OpenGL on macOS stops at version 4.1, which has no image load/store. The features built on it
-stay off: **Colored area lights**, **Coloured light fog**, **Path tracing**, the voxel
-**Scattering method**, GI denoising and DLSS. The hook disables them when it compiles the
-shaders, so those menu options do nothing on a Mac. Mac keyboards have no Home or Pause key:
+Apple's **MetalFX** replaces DLSS (menu tab **Apple MetalFX**): new installations render at 67
+percent of the window and MetalFX rebuilds the rest. OpenGL on macOS stops at version 4.1, which
+has no image load/store: **Colored area lights**, **Coloured light fog** and GI denoising stay off;
+path tracing and voxel scattering use a texture atlas instead. Mac keyboards have no Home or Pause key:
 **fn+Left** opens the menu, and **General → Shaders** switches the pack off for comparison.
 
 - **After a game update:** close Hytale and run `./install.sh` again.
