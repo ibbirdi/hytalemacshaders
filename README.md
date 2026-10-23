@@ -29,8 +29,17 @@ needed. Then start Hytale from the launcher as usual: **fn+Left** opens the shad
   curl -fsSL https://raw.githubusercontent.com/ibbirdi/hytalemacshaders/main/setup-macos.sh | bash -s -- --uninstall
   ```
 
-- **Choose the quality class** instead of the detected one (`high`, `medium` or `low`), on a fresh
-  install: `curl -fsSL .../setup-macos.sh | AURORA_MAC_TIER=medium bash`.
+- **Back to the recommended settings** for your Mac (keeps saved presets):
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/ibbirdi/hytalemacshaders/main/setup-macos.sh | bash -s -- --reset-settings
+  ```
+
+- **Choose the quality class** instead of the detected one (`high`, `medium` or `low`):
+  `curl -fsSL .../setup-macos.sh | AURORA_MAC_TIER=medium bash -s -- --reset-settings`.
+
+The installer also sets Hytale's own Render Scale to 100 percent: MetalFX sets the render size, and
+the two would add up. The menu only shows what works on a Mac.
 
 Shaders run on your Mac only, so players with and without them play together normally.
 How it works and what was tested: [macOS notes](docs/macos.md).

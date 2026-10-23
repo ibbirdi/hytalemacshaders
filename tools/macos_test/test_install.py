@@ -91,6 +91,21 @@ class MacInstallTests(unittest.TestCase):
 
 
 class MacSettingsTests(unittest.TestCase):
+    def test_game_render_scale_goes_to_100(self):
+        import linux_install
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            hytale = home / "Library/Application Support/Hytale"
+            (hytale / "UserData").mkdir(parents=True)
+            (hytale / "patchline.json").write_text('{"patchline": "release", "user_data": "%s"}' % (hytale / "UserData"))
+            settings = hytale / "UserData/Settings.json"
+            settings.write_text('{"FormatVersion": 7, "RenderingSettings": {"RenderScale": 55, "Lod": 4}, "VSync": true}')
+            self.assertEqual(linux_install.mac_game_render_scale(home), 55)
+            data = __import__("json").loads(settings.read_text())
+            self.assertEqual(data["RenderingSettings"], {"RenderScale": 100, "Lod": 4})
+            self.assertIs(data["VSync"], True)
+            self.assertIsNone(linux_install.mac_game_render_scale(home))
+
     DEFAULTS = "#define AU_TAA_JITTER 0\n#define AU_METALFX 0\n#define AU_RENDER_SCALE 0\n#define AU_RTX_GI_RAYS 8\n#define AU_DLSS 0\n"
 
     def test_mac_starting_point_applies_once(self):

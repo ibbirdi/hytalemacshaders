@@ -4219,7 +4219,11 @@ static void display_value(const MenuOpt *m, wchar_t *out, int cap)
     }
     if (m->kind == MO_INFO) {
         if (!strcmp(m->define, "!TAA_INFO")) {
+#ifdef __APPLE__
+            _snwprintf(out, cap, L"Render Scale 100%%");
+#else
             _snwprintf(out, cap, L"Disable Hytale TAA");
+#endif
             out[cap - 1] = 0;
             return;
         }

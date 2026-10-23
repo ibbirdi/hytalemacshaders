@@ -105,7 +105,8 @@ def atomic_copy(source, target):
 # Apple Silicon starting points (hook/profiles.h, macOS block), by GPU class: MetalFX upscaling,
 # TAA jitter, half-resolution GI and light shafts, sample counts the temporal filters integrate
 # anyway. Applied once, to settings from before these options existed, so later choices are kept.
-MAC_COMMON = {"AU_TAA_JITTER": "1", "AU_HALF_RES_FX": "1", "AU_METALFX": "1"}
+MAC_COMMON = {"AU_TAA_JITTER": "1", "AU_HALF_RES_FX": "1", "AU_HALF_HISTORY": "16", "AU_METALFX": "1",
+              "AU_METALFX_DENOISER": "0", "AU_METALFX_METAL4": "0", "AU_DYNAMIC_SHADOWS": "1", "AU_DYNAMIC_LIGHT_SIZE": "0.6"}
 MAC_TIERS = {
     # M4 Pro / Max, M5 and later: path tracing on
     "high": {"AU_RENDER_SCALE": "67", "AU_RTX_GI_RAYS": "4", "AU_LIGHTSHAFT_SAMPLES": "16",
@@ -146,6 +147,9 @@ def mac_defaults(tier=None):
     return {**MAC_COMMON, **MAC_TIERS[tier or mac_tier()]}
 
 
+# Measured on an M5 Pro (hook.log): the denoised scaler costs about 10 ms a frame and Metal 4 is
+# slower than the original queue, so neither is part of the starting point; the half-resolution
+# GI accumulation denoises path tracing instead.
 def merge_settings(defaults, previous, dlss_supported=False, mac=MAC):
     scalar = r"(?m)^(#define\s+(AU_\w+)\s+)([-+]?\d+(?:\.\d+)?)(?=\s|$)"
     values = {match[1]: match[2] for match in re.findall(scalar, previous)}
@@ -187,7 +191,7 @@ def write_state(directory, saved):
         pending.unlink(missing_ok=True)
 
 
-def install(client, proxy, pack):
+def install(client, proxy, pack, reset=False):
     require_stopped(client)
     directory, saved = state(client)
     library, backup = client / LIBRARY, client / BACKUP
@@ -238,7 +242,8 @@ def install(client, proxy, pack):
         if saved and previous_presets.is_dir() and not previous_presets.is_symlink():
             shutil.copytree(previous_presets, stage / "shaderpack/presets", dirs_exist_ok=True)
         if staged_settings.is_file():
-            previous = settings.read_text(encoding="utf-8-sig") if saved and settings.is_file() else ""
+            # reset: the starting point again (on macOS the one for this chip), as a fresh install.
+            previous = settings.read_text(encoding="utf-8-sig") if saved and settings.is_file() and not reset else ""
             staged_settings.write_text(merge_settings(staged_settings.read_text(encoding="utf-8-sig"), previous, DLSS_MARKER in proxy.read_bytes()), encoding="utf-8")
         shutil.copy2(original, stage / "original.so")
         shutil.copy2(proxy, stage / "proxy.so")

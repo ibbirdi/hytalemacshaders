@@ -83,6 +83,30 @@ def launch_command(config, extra, env):
     return [launcher, *extra], env.copy()
 
 
+def mac_game_render_scale(home=None):
+    """Hytale's own Render Scale adds to MetalFX's render size on macOS: keep it at 100 percent.
+    Returns the previous value when it changed it."""
+    hytale = (home or Path.home()) / "Library/Application Support/Hytale"
+    try:
+        user_data = Path(json.loads((hytale / "patchline.json").read_text()).get("user_data") or hytale / "UserData")
+    except (OSError, ValueError, AttributeError):
+        user_data = hytale / "UserData"
+    settings = user_data / "Settings.json"
+    try:
+        data = json.loads(settings.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    rendering = data.get("RenderingSettings") if isinstance(data, dict) else None
+    if not isinstance(rendering, dict) or rendering.get("RenderScale", 100) in (100, None):
+        return None
+    previous = rendering["RenderScale"]
+    rendering["RenderScale"] = 100
+    pending = settings.with_suffix(".aurora-tmp")
+    pending.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    pending.replace(settings)
+    return previous
+
+
 def build_proxy(force=False):
     proxy = ROOT / ("build/libaurora-sdl.dylib" if linux_hook.MAC else "build/libaurora-sdl.so")
     dlss_supported = not linux_hook.MAC and linux_dlss.configure()
@@ -102,6 +126,8 @@ def main():
     parser.add_argument("--backend", choices=("native", "flatpak"), help="Override launcher detection")
     parser.add_argument("--launcher", type=Path, help="Native hytale-launcher executable")
     parser.add_argument("--build", action="store_true", help="Rebuild even if a library is already present")
+    parser.add_argument("--reset-settings", action="store_true",
+                        help="Start the shader settings again from the defaults (on macOS: those for this chip); presets are kept")
     parser.add_argument("--uninstall", action="store_true", help="Restore the original SDL3 library and keep shader settings")
     parser.add_argument("--launch", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--print-command", action="store_true", help="Show launch command without starting the game")
@@ -146,7 +172,11 @@ def main():
                 launcher = next((p / "hytale-launcher" for p in client.parents if (p / "hytale-launcher").is_file()), None)
         proxy = build_proxy(args.build)
         prepare(executable, ROOT / "shaderpack", client.parent / "Assets.zip")
-        installed_pack = linux_hook.install(client, proxy, ROOT / "shaderpack")
+        installed_pack = linux_hook.install(client, proxy, ROOT / "shaderpack", reset=args.reset_settings)
+        if linux_hook.MAC:
+            previous_scale = mac_game_render_scale()
+            if previous_scale is not None:
+                print(f"Hytale's Render Scale was {previous_scale}%; set to 100% (MetalFX sets the render resolution).")
         config = {"client_dir": str(client), "backend": backend,
                   "client_fingerprint": fingerprint(executable), "launcher": str(launcher) if launcher else None,
                   "automatic": True, "installed_pack": str(installed_pack)}

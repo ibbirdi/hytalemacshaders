@@ -4,6 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/ibbirdi/hytalemacshaders/main/setup-macos.sh | bash
 #
 # Uninstall:  curl -fsSL https://raw.githubusercontent.com/ibbirdi/hytalemacshaders/main/setup-macos.sh | bash -s -- --uninstall
+# Recommended settings again:  ... | bash -s -- --reset-settings
 #
 # It needs Apple's command line tools (compiler, git, Python), which macOS offers to install, keeps
 # its checkout in ~/Library/Application Support/HytaleMacShaders and runs ./install.sh from there.
@@ -51,5 +52,6 @@ if [[ " $* " == *" --uninstall "* ]]; then
     echo "Hytale est revenu à son état d'origine."
 else
     echo "Lance Hytale avec le lanceur comme d'habitude. fn + ← ouvre le menu des shaders."
+    [[ " $* " == *" --reset-settings "* ]] && echo "Les réglages recommandés pour ce Mac sont appliqués (préréglages conservés)."
     echo "Après une mise à jour de Hytale, relance simplement cette même commande."
 fi

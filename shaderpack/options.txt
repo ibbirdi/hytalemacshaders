@@ -4,7 +4,8 @@
 # "@ Name" creates a category tab. Changes are saved and hot-reloaded.
 
 @ General
-!TAA_INFO | REMINDER/WARNING: | info | 0 | REMINDER/WARNING: Disable TAA in Hytale Graphics settings. It can cause shaking and ghosting. Aurora TAA and NVIDIA DLSS settings are separate.
+?!apple !TAA_INFO | REMINDER/WARNING: | info | 0 | REMINDER/WARNING: Disable TAA in Hytale Graphics settings. It can cause shaking and ghosting. Aurora TAA and NVIDIA DLSS settings are separate.
+?apple !TAA_INFO | Hytale settings: | info | 0 | Keep Hytale's own Render Scale at 100 percent: the Apple MetalFX tab sets the render resolution, and the two would add up (the installer sets it). Hytale's anti-aliasing setting does not matter while MetalFX runs.
 AU_MENU_KEY | Menu hotkey | key | 36 | Click or press Right, release held keys, then press a key. Escape cancels. Arrows, PgUp/PgDn and Pause are reserved. Saved across restarts; profiles keep it. Reset restores Home.
 !PACK | Shaders | bool
 AU_PRESET | Profile family | internal | 2
@@ -16,7 +17,8 @@ AU_CAVE_LIGHTING | Cave lighting % | range 0.0 500.0 25.0 | 250.0
 !PROFILE_SAVE | Save current settings as... | action | 0 | Enter a name in the field above while holding Alt, then press Enter or click Save name. Existing profiles are never overwritten.
 !PROFILE_EXPORT | Export saved profile | action | 0 | Apply a saved custom profile, then export it as a shareable GLSL file in shaderpack/presets/exports. Includes its name and settings. Existing exports are never overwritten.
 !PROFILE_DELETE | Delete saved profile | action | 0 | Apply a custom profile, then delete and confirm within five seconds. Current settings and exports stay. Default and quality presets cannot be deleted.
-!PROFILE | Quality profiles | list | -1 | Click a profile or press Right to apply it. RTX uses DLSS Quality+ at 77% with RR when supported. Non-RTX uses native resolution with DLSS off. Both offer Lowest through Ultra.
+?!apple !PROFILE | Quality profiles | list | -1 | Click a profile or press Right to apply it. RTX uses DLSS Quality+ at 77% with RR when supported. Non-RTX uses native resolution with DLSS off. Both offer Lowest through Ultra.
+?apple !PROFILE | Quality profiles | list | -1 | Click a profile or press Right to apply it. RTX profiles use MetalFX below the window size (by chip: 67 percent on M4 Pro / M5 and later, 58 on Pro and Max chips before, 50 on M1 / M2) with screen-space GI; their two highest levels add path tracing on the fast chips. Non-RTX profiles render closer to native without GI.
 
 @ Lighting
 AU_POLISH_SUNLIGHT | Outdoor sunlight | bool | 1 | Requires Surface detail & shading. On in Medium through Ultra for both profile families; off in Lowest and Low. Directional sky fill, sun colour, highlight protection and foliage. Individual controls below and in Shadows.
@@ -53,7 +55,7 @@ AU_DYNAMIC_LIGHT_SIZE | Dynamic light size | range 0.0 3.0 0.1 | 0.6 | Requires 
 ?!apple AU_LOCAL_LIGHT_SOFTNESS | Area light size | range 0.0 0.8 0.05 | 0.35 | Larger sources cast softer shadows. Zero uses a point source.
 ?!apple AU_LOCAL_LIGHT_CANDIDATES | Light sampling candidates | enum 4:4 8:8 16:16 | 8 | Candidate count for the fallback without spatial culling. Original and NVIDIA Ray Reconstruction automatically consider nearby lights in their spatial cell to avoid rare bright samples. RGB channels share shadow rays where possible, using one to three rays.
 ?!apple AU_LOCAL_LIGHT_BUDGET | Area light budget | enum 16:16 32:32 64:64 128:128 | 32 | Most area lights evaluated per pixel. Where more reach a spot (a lava lake lists hundreds), a random share is evaluated each frame and the anti-aliasing averages it: lower is faster and grainier. Coloured light fog uses a quarter of it per step.
-AU_ORE_TORCH_RATIO | Ore light / torch ratio | range 0.0 1.0 0.05 | 0.3 | Ore light brightness relative to a torch, independent of surface glow and bloom.
+?!apple AU_ORE_TORCH_RATIO | Ore light / torch ratio | range 0.0 1.0 0.05 | 0.3 | Ore light brightness relative to a torch, independent of surface glow and bloom.
 AU_SUBSURFACE | Foliage translucency | bool | 1
 AU_SSS | Subsurface scattering | bool | 1 | Coloured transmission through foliage and ice. Voxel mode measures material depth and accumulates scattering along a bounded ray; solid walls still block light.
 AU_SSS_VOXEL | Scattering method | enum 0:Surface_approximation 1:Voxel_depth_+_accumulation 2:Foliage_shadow_dithering | 1 | Voxel mode measures leaf/ice depth. Dithering selectively opens foliage shadow-map texels, not camera depth. The methods are alternatives, avoiding double transmission.
@@ -226,14 +228,14 @@ AU_TAA | Temporal anti-aliasing | bool | 1
 AU_TAA_BLEND | TAA history weight | range 0.0 0.97 0.01 | 0.93 | Previous-frame TAA weight. Lower values reduce trails but may reveal more edge shimmer and noise.
 AU_TAA_CLIP | TAA history clipping | range 0.5 2.0 0.05 | 1.25 | TAA history-clipping tolerance. Lower values reject mismatched history more aggressively.
 AU_TAA_JITTER | Sub-pixel jitter | bool | 0 | Shifts the camera by a fraction of a pixel every frame so the TAA resolves edges as well as noise (no upscaler needed). Turn off if edges shimmer.
-AU_UPSCALE_SHARPNESS | Upscale sharpness | range 0.0 1.0 0.05 | 0.3 | Used while Hytale's Render Scale is below 100 percent: the frame is scaled into the window with a bicubic filter and this much sharpening.
+?!apple AU_UPSCALE_SHARPNESS | Upscale sharpness | range 0.0 1.0 0.05 | 0.3 | Used while Hytale's Render Scale is below 100 percent: the frame is scaled into the window with a bicubic filter and this much sharpening.
 ?apple @ Apple MetalFX
 ?apple AU_METALFX | MetalFX upscaling | bool | 0 | Apple's temporal upscaler in place of the TAA: the scene renders at the resolution below and MetalFX rebuilds the full window from several frames. Keep Hytale Render Scale at 100 percent.
 ?apple AU_RENDER_SCALE | Render resolution (live) | enum 0:Native 100:100%_(anti-aliasing_only) 85:85% 77:77% 67:67%_Quality 58:58%_Balanced 50:50%_Performance | 0 | Changes the actual scene buffers without resizing the window. Requires MetalFX upscaling.
 ?apple !DLSS_INFO | Active render size | info
 ?apple AU_DLSS_SHARPNESS | MetalFX sharpness | range 0.0 1.0 0.05 | 0.2 | Edge-limited sharpening after MetalFX. Zero disables this pass.
 ?apple AU_METALFX_DENOISER | Denoised scaler | bool | 0 | MetalFX's own ray reconstruction (macOS 26): it also denoises the lighting, guided by each surface's albedo, normal and roughness. Costs several times the plain upscaler at Retina sizes (about 14 ms at 50 percent of 4112x2516 on an M5 Pro).
-?apple AU_METALFX_METAL4 | Submit through Metal 4 | bool | 0 | MetalFX through Metal 4's command queue and scalers (macOS 26). Measured a little slower than the original queue on an M5 Pro; the image is the same.
+?!apple AU_METALFX_METAL4 | Submit through Metal 4 | bool | 0 | MetalFX through Metal 4's command queue and scalers (macOS 26). Measured a little slower than the original queue on an M5 Pro; the image is the same.
 ?!apple @ NVIDIA DLSS
 ?!apple AU_DLSS | Super Resolution / DLAA | bool | 0
 ?!apple AU_RENDER_SCALE | Render resolution (live) | enum 0:Native 100:100%_DLAA 85:85%_Quality++ 77:77%_Quality+ 67:67%_Quality 58:58%_Balanced 50:50%_Performance 33:33%_Ultra_Performance | 0 | Changes the actual scene buffers without resizing the window. Quality+ and Quality++ use custom Aurora render ratios with NVIDIA's Quality mode. Keep Hytale Render Scale at 100 percent; enable DLSS to apply this setting.
