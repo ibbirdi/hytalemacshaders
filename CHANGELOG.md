@@ -7,6 +7,8 @@
 - Path tracing and the voxel scattering method work on macOS: without image load/store the voxel grid lives in a texture atlas the hook fills from what the screen shows.
 - Added **Half-resolution GI and light shafts**: the screen-space GI rays and the light shafts run on a quarter of the pixels and are upsampled along surfaces. On by default on macOS.
 - Added **Sub-pixel jitter** for the TAA without an upscaler, so it resolves edges as well as noise (on by default on macOS), and a bicubic, sharpened scale-to-window for Hytale's Render Scale below 100 percent (**Upscale sharpness**).
+- Added **Dynamic light shadows**: a torch in the hand, lanterns, glowing items and projectiles cast shadows from the terrain (one ray per light through the voxel grid) and light surfaces by the way they face. On by default.
+- With **Half-resolution GI and light shafts**, path tracing also traces a quarter of the pixels.
 - Saving a setting from the menu no longer reloads the shaders twice. The hook also sends fewer redundant GL calls per draw.
 - The Linux hook now advances its frame counter every frame, as the Windows hook does. Before, temporal reprojection kept the first frame's camera and `uHookFrame` stayed at 0.
 

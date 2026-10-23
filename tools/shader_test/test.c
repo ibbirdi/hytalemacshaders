@@ -325,8 +325,8 @@ static int check_atlas_deferred_pair(int tracing, int half)
         char message[8192] = {0}; getProgramLog(program, sizeof message, NULL, message);
         fprintf(stderr, "FAIL atlas DeferredFS link: %s\n", message);
     }
-    const char *uniforms[] = {"uHookPTPass", "uHookVoxFeedOffset", "auVoxGeoAtlas", "auVoxColAtlas", "uHookHalfPass"};
-    int count = half ? 5 : 4;
+    const char *uniforms[] = {"uHookPTPass", "uHookVoxFeedOffset", "auVoxGeoAtlas", "auVoxColAtlas", "uHookHalfPass", "uHookHalfSky"};
+    int count = half ? (tracing ? 6 : 5) : 4;
     valid = valid && linked;
     for (int index = 0; index < count && valid; index++)
         if (r_glGetUniformLocation(program, uniforms[index]) < 0) {
@@ -455,7 +455,7 @@ static int check_voxel_atlas(void)
 {
     const char *vertex = "#version 410 core\nvoid main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));gl_Position=vec4(p*2.0-1.0,0.0,1.0);}";
     const char *fragment = "#version 410 core\nuniform int uHookPTPass;uniform vec2 uHookVoxFeedOffset;\n"
-        "layout(location=0) out vec4 outColor;layout(location=2) out uvec4 auVoxFeed;\n"
+        "layout(location=0) out vec4 outColor;layout(location=3) out uvec4 auVoxFeed;\n"
         "void main(){if(uHookPTPass!=1){outColor=vec4(1.0,0.0,1.0,1.0);return;}uint x=uint(gl_FragCoord.x+uHookVoxFeedOffset.x);"
         "auVoxFeed=uvec4((256u+x)|(133u<<16),0x202u,(768u+x)|(9u<<16),0x101u);outColor=vec4(0.5,0.25,1.0,0.5);}";
     GLuint (APIENTRY *createProgram)(void) = (void *)real_wglGetProcAddress("glCreateProgram");
@@ -952,6 +952,43 @@ int main(int argumentCount, char **arguments)
     for (int tracing = 0; tracing < 2; tracing++)
     for (int half = 0; half < 2; half++) { failures += !check_atlas_deferred_pair(tracing, half); tested += 2; }
 #endif
+    {
+        // Linked with ScreenVS, the dynamic light pass keeps the hook's inputs.
+        GLuint (APIENTRY *createProgram)(void) = (void *)real_wglGetProcAddress("glCreateProgram");
+        GLuint program = createProgram();
+        const char *names[2] = {"ScreenVS", "LightClusteredFS"};
+        int compiledStages = 0;
+        for (int stage = 0; stage < 2; stage++) {
+            char *source = shader_source(names[stage]);
+            if (!stage) source = override_number(source, "USE_FAR_CORNERS", "1");
+            source = driver_source(source);
+            GLuint shader = r_glCreateShader(stage ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER);
+            const GLchar *pointer = source;
+            r_glShaderSource(shader, 1, &pointer, NULL); r_glCompileShader(shader);
+            GLint compiled = 0; r_glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+            compiledStages += compiled != 0;
+            r_glAttachShader(program, shader); r_glDeleteShader(shader); free(source);
+        }
+        GLint linked = 0;
+        if (compiledStages == 2) { r_glLinkProgram(program); r_glGetProgramiv(program, GL_LINK_STATUS, &linked); }
+        int valid = linked && r_glGetUniformLocation(program, "uHookGBuffer1") >= 0 && r_glGetUniformLocation(program, "uHookFrame") >= 0
+                 && r_glGetUniformLocation(program, "auVoxGeoAtlas") >= 0 && r_glGetUniformLocation(program, "uLightGridTexture") >= 0;
+        if (!valid) {
+            char message[4096] = {0};
+            void (APIENTRY *getLog)(GLuint, GLsizei, GLsizei *, GLchar *) = (void *)real_wglGetProcAddress("glGetProgramInfoLog");
+            getLog(program, sizeof message - 1, NULL, message);
+            fprintf(stderr, "FAIL dynamic light pass: linked=%d (%d stages), hook inputs inactive: %s\n", linked, compiledStages, message);
+        }
+        failures += !valid; tested++;
+    }
+    for (int shadows = 0; shadows < 2; shadows++)
+    for (int linear = 0; linear < 2; linear++) {
+        char *text = shader_source("LightClusteredFS");
+        text = override_number(text, "AU_DYNAMIC_SHADOWS", shadows ? "1" : "0");
+        text = override_number(text, "USE_LINEAR_Z", linear ? "1" : "0");
+        char label[100]; snprintf(label, sizeof(label), "Dynamic light shadows=%d linear=%d", shadows, linear);
+        failures += !check_source(label, text); tested++;
+    }
     for (int half = 0; half < 2; half++)
     for (int preset = 1; preset <= 2; preset++)
     for (int selfHit = 0; selfHit < 2; selfHit++)

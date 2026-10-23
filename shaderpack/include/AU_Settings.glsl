@@ -219,7 +219,10 @@
 #define AU_LOCAL_LIGHT_CANDIDATES 8
 #define AU_LOCAL_LIGHT_BUDGET 32       // most area lights evaluated per pixel; more reaching a spot are sampled
 #define AU_ORE_TORCH_RATIO 0.3
-#define AU_VOXEL_WORLD (AU_VOXELS || AU_LOCAL_LIGHTS || (AU_SSS && AU_SSS_VOXEL == 1))
+#define AU_DYNAMIC_SHADOWS 1          // torches in hand, lanterns and other moving lights cast shadows (LightClusteredFS)
+#define AU_DYNAMIC_LIGHT_FACING 0.8   // how much those lights follow the way a surface faces them (0 = Hytale's flat light)
+#define AU_DYNAMIC_LIGHT_SIZE 1.0     // size of those lights: softer shadows when larger
+#define AU_VOXEL_WORLD (AU_VOXELS || AU_LOCAL_LIGHTS || (AU_SSS && AU_SSS_VOXEL == 1) || AU_DYNAMIC_SHADOWS)
 #define AU_VOXEL_ATLAS 0              // hook (macOS): the grid in 2D textures the hook writes, for OpenGL without image load/store
 
 // ---- Path tracing (RTX preset) -------------------------------------------------------

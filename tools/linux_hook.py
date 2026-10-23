@@ -117,7 +117,7 @@ MAC_TIERS = {
     # M1, M2: the non-RTX preset (no screen-space GI)
     "low": {"AU_RENDER_SCALE": "50", "AU_PRESET": "1", "AU_LIGHTSHAFT_SAMPLES": "8", "AU_SHADOW_SAMPLES": "8",
             "AU_FAR_SHADOWS": "0", "AU_CONTACT_SHADOW_STEPS": "8", "AU_SSS_VOXEL": "0", "AU_CLOUD_LAYERS": "1",
-            "AU_PCSS": "0"},
+            "AU_PCSS": "0", "AU_DYNAMIC_SHADOWS": "0"},
 }
 
 

@@ -41,6 +41,9 @@ AU_EMISSION_STRENGTH | Emissive glow | range 0.0 6.0 0.25 | 3.0
 AU_EMISSIVE_BLOOM | Emissive bloom | range 0.0 20.0 0.5 | 4.0
 AU_NATIVE_EMISSION | Native glowing blocks | bool | 1 | Uses Hytale's item light definitions and tint variants, including luminous moss. Rebuild metadata after game updates.
 AU_NATIVE_EMISSION_STRENGTH | Native block glow | range 0.0 3.0 0.1 | 1.0
+AU_DYNAMIC_SHADOWS | Dynamic light shadows | bool | 1 | A torch in the hand, lanterns, glowing items and projectiles cast shadows from the terrain (one ray per light through the voxel grid) and light surfaces by the way they face. Players and mobs cast none.
+AU_DYNAMIC_LIGHT_FACING | Dynamic light direction | range 0.0 1.0 0.05 | 0.8 | Requires Dynamic light shadows. How much moving lights darken the faces turned away from them. Zero keeps Hytale's flat light.
+AU_DYNAMIC_LIGHT_SIZE | Dynamic light size | range 0.0 3.0 0.1 | 1.0 | Requires Dynamic light shadows. Larger lights cast softer shadows.
 ?!apple AU_LOCAL_LIGHTS | Colored area lights | bool | 1 | Texture-colored light from native emitters and ores, with traced soft shadows in both shader presets and both GI modes.
 ?!apple AU_LOCAL_LIGHT_STRENGTH | Area light intensity | range 0.0 3.0 0.1 | 1.0
 ?!apple AU_EMISSIVE_LIGHT_STRENGTH | Coloured bulb / potion light | range 0.0 6.0 0.25 | 1.75 | Boosts nearby illumination from coloured emitter pixels without changing ore lighting, surface glow, or bloom. Multiplies area-light intensity.
@@ -106,7 +109,7 @@ AU_CLOTH_TRANSMIT | Sun through curtains / cloth | range 0.0 2.0 0.1 | 0.5
 AU_RTX_GI_STRENGTH | Bounce light | range 0.0 3.0 0.1 | 1.0
 AU_RTX_GI_AO | Ray-traced AO | range 0.0 1.0 0.05 | 0.55
 AU_RTX_GI_RAYS | Screen-space rays (no PT) | range 4 32 4 | 8
-AU_HALF_RES_FX | Half-resolution GI and light shafts | bool | 0 | Traces the screen-space GI and the light shafts at a quarter of the pixels and fills in the rest from the nearest samples on the same surface. A large saving at Retina and 4K sizes; the TAA hides the softer result. With path tracing only the light shafts are halved. Not with GI denoising.
+AU_HALF_RES_FX | Half-resolution GI and light shafts | bool | 0 | Traces the screen-space GI and the light shafts at a quarter of the pixels and fills in the rest from the nearest samples on the same surface. A large saving at Retina and 4K sizes; the TAA hides the softer result. With path tracing the traced rays are halved too (four times fewer rays). Not with GI denoising.
 AU_RTX_GI_RADIUS | Screen-space reach (no PT) | range 2.0 16.0 0.5 | 8.0
 AU_RTX_SSR_STEPS | Material reflection steps | range 8 64 4 | 32
 AU_SSR_REFINED | Refined reflections | bool | 1 | Pins every reflection hit to the surface (no stepping), rejects the backs of surfaces, fades uncertain hits to the sky, and blurs rough reflections more the further the reflected surface is. Off restores the previous reflections.

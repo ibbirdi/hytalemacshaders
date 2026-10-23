@@ -174,6 +174,7 @@ static void menu_profile_builtin(int selected)
     // chips; every Mac can still switch it on in the Path tracing tab.
     int tracing = rtx && tier >= 4 && apple_gpu_tier() == 2;
     menu_profile_set("AU_PATH_TRACING", tracing);
+    menu_profile_set("AU_DYNAMIC_SHADOWS", tier >= 1);
     menu_profile_set("AU_PT_RAYS", 2);
 #endif
 }

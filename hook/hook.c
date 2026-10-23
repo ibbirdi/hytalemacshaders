@@ -1752,8 +1752,9 @@ static void gi_draw(GLenum mode, GLint first, GLsizei count)
 
 #define HALF_UNIT_GI (HOOK_UNIT_BASE + 4)
 #define HALF_UNIT_VL (HOOK_UNIT_BASE + 5)
+#define HALF_UNIT_SKY (HOOK_UNIT_BASE + 11)
 #define MFX_UNIT_OUTPUT (HOOK_UNIT_BASE + 6)   // MetalFX's output (a rectangle texture) for the resolve
-static GLuint g_halfFbo, g_halfTex[2];
+static GLuint g_halfFbo, g_halfTex[3];   // GI, light shafts, path-traced sky visibility
 static int g_halfW, g_halfH, g_halfFailed;
 
 static struct {
@@ -1865,8 +1866,9 @@ static void half_release(void)
     if (!g_halfTex[0]) return;
     hook_bind_unit(HALF_UNIT_GI, 0);
     hook_bind_unit(HALF_UNIT_VL, 0);
-    hgl.DeleteTextures(2, g_halfTex);
-    g_halfTex[0] = g_halfTex[1] = 0;
+    hook_bind_unit(HALF_UNIT_SKY, 0);
+    hgl.DeleteTextures(3, g_halfTex);
+    g_halfTex[0] = g_halfTex[1] = g_halfTex[2] = 0;
     g_halfW = g_halfH = 0;
 }
 
@@ -1879,18 +1881,19 @@ static int half_targets(int width, int height)
     GLint previousTexture = 0, previousFramebuffer = 0;
     r_glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
     r_glGetIntegerv(0x8CA6 /*GL_DRAW_FRAMEBUFFER_BINDING*/, &previousFramebuffer);
-    hgl.GenTextures(2, g_halfTex);
+    hgl.GenTextures(3, g_halfTex);
     hgl.BindFramebuffer(0x8CA9 /*DRAW_FRAMEBUFFER*/, g_halfFbo);
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         r_glBindTexture(GL_TEXTURE_2D, g_halfTex[i]);
         hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
-        hgl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, NULL);
+        if (i < 2) hgl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, NULL);
+        else hgl.TexImage2D(GL_TEXTURE_2D, 0, 0x822D /*R16F*/, width, height, 0, 0x1903 /*RED*/, GL_FLOAT, NULL);
         hgl.FramebufferTexture2D(0x8CA9, 0x8CE0 /*COLOR_ATTACHMENT0*/ + i, GL_TEXTURE_2D, g_halfTex[i], 0);
     }
-    static const GLenum buffers[2] = {0x8CE0, 0x8CE1};   // COLOR_ATTACHMENT0, 1
-    hgl.DrawBuffers(2, buffers);
+    static const GLenum buffers[3] = {0x8CE0, 0x8CE1, 0x8CE2};   // COLOR_ATTACHMENT0-2
+    hgl.DrawBuffers(3, buffers);
     GLenum status = hgl.CheckFramebufferStatus(0x8CA9);
     hgl.BindFramebuffer(0x8CA9, (GLuint)previousFramebuffer);
     r_glBindTexture(GL_TEXTURE_2D, (GLuint)previousTexture);
@@ -1917,16 +1920,18 @@ static void half_draw(ProgRec *program, GLenum mode, GLint first, GLsizei count)
         r_glDrawArrays(mode, first, count);
         return;
     }
-    static const GLfloat clearGI[4] = {0.0f, 0.0f, 0.0f, 1.0f}, clearShafts[4] = {0.0f, 0.0f, 0.0f, 1e6f};
+    static const GLfloat clearGI[4] = {0.0f, 0.0f, 0.0f, 1.0f}, clearShafts[4] = {0.0f, 0.0f, 0.0f, 1e6f}, clearSky[4] = {1.0f, 0.0f, 0.0f, 0.0f};
     profile_use("Half-res GI + light shafts");
     HookPassState state = hook_pass_begin(g_halfFbo, width, height);
     hgl.ClearBufferfv(0x1800 /*COLOR*/, 0, clearGI);
     hgl.ClearBufferfv(0x1800 /*COLOR*/, 1, clearShafts);
+    hgl.ClearBufferfv(0x1800 /*COLOR*/, 2, clearSky);
     r_glUniform1i(program->locHalfPass, 1);
     r_glDrawArrays(mode, first, count);
     hook_pass_end(&state);
     hook_bind_unit(HALF_UNIT_GI, g_halfTex[0]);
     hook_bind_unit(HALF_UNIT_VL, g_halfTex[1]);
+    hook_bind_unit(HALF_UNIT_SKY, g_halfTex[2]);
     profile_use(program->pname);
     r_glUniform1i(program->locHalfPass, 2);
     r_glDrawArrays(mode, first, count);
@@ -2004,8 +2009,8 @@ static void vox_atlas_release(void)
     g_voxAtlas[0] = g_voxAtlas[1] = 0;
 }
 
-// Feed target: colour (RGBA8, attachment 0) and cells (RGBA32UI, attachment 2: DeferredFS's
-// output 1 is the half-resolution light shafts).
+// Feed target: colour (RGBA8, attachment 0) and cells (RGBA32UI, attachment 3: DeferredFS's
+// outputs 1 and 2 are the half-resolution light shafts and sky visibility).
 static int vox_feed_targets(int width, int height)
 {
     if (g_voxFeedTex[0] && width == g_voxFeedW && height == g_voxFeedH) return 1;
@@ -2027,10 +2032,10 @@ static int vox_feed_targets(int width, int height)
         hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
         if (i == 0) hgl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
         else hgl.TexImage2D(GL_TEXTURE_2D, 0, 0x8D70 /*RGBA32UI*/, width, height, 0, 0x8D99 /*RGBA_INTEGER*/, GL_UNSIGNED_INT, NULL);
-        hgl.FramebufferTexture2D(0x8CA9, i ? 0x8CE2 : 0x8CE0, GL_TEXTURE_2D, g_voxFeedTex[i], 0);
+        hgl.FramebufferTexture2D(0x8CA9, i ? 0x8CE3 : 0x8CE0, GL_TEXTURE_2D, g_voxFeedTex[i], 0);
     }
-    static const GLenum buffers[3] = {0x8CE0, 0 /*NONE*/, 0x8CE2};
-    hgl.DrawBuffers(3, buffers);
+    static const GLenum buffers[4] = {0x8CE0, 0 /*NONE*/, 0 /*NONE*/, 0x8CE3};
+    hgl.DrawBuffers(4, buffers);
     GLenum status = hgl.CheckFramebufferStatus(0x8CA9);
     hgl.BindFramebuffer(0x8CA9, (GLuint)previousFramebuffer);
     r_glBindTexture(GL_TEXTURE_2D, (GLuint)previousTexture);
@@ -2110,7 +2115,7 @@ static void vox_atlas_feed(ProgRec *program, GLenum mode, GLint first, GLsizei c
     static const GLuint noCells[4] = {0xffffffffu, 0, 0xffffffffu, 0};
     HookPassState state = hook_pass_begin(g_voxFeedFbo, width, height);
     hgl.ClearBufferfv(0x1800 /*COLOR*/, 0, noColor);
-    hgl.ClearBufferuiv(0x1800, 2, noCells);
+    hgl.ClearBufferuiv(0x1800, 3, noCells);
     r_glUniform2f(program->locVoxFeed, offsetX, offsetY);
     r_glUniform1i(program->locPTPass, 1);
     r_glDrawArrays(mode, first, count);
@@ -3384,8 +3389,10 @@ static void check_extras(GLuint prog, ProgRec *p)
     p->locHalfPass = r_glGetUniformLocation(prog, "uHookHalfPass");
     if (p->locHalfPass >= 0) {
         GLint gi = r_glGetUniformLocation(prog, "uHookHalfGI"), shafts = r_glGetUniformLocation(prog, "uHookHalfVL");
+        GLint sky = r_glGetUniformLocation(prog, "uHookHalfSky");
         if (gi >= 0) r_glUniform1i(gi, HALF_UNIT_GI);
         if (shafts >= 0) r_glUniform1i(shafts, HALF_UNIT_VL);
+        if (sky >= 0) r_glUniform1i(sky, HALF_UNIT_SKY);
         r_glUniform1i(p->locHalfPass, 0);
         p->hasExtras = 1;
     }
@@ -3651,9 +3658,11 @@ static void settings_load(void)
         }
     }
 #ifdef __APPLE__
-    // The atlas grid (no local lights here): only path tracing and voxel scattering read it.
+    // The atlas grid (no local lights here): path tracing, voxel scattering and dynamic light
+    // shadows read it.
     if (g_voxAtlasMode && g_voxState == 1 && !g_setVoxelColors
-        && !(settings_num(txt, "AU_SSS", 1) > 0.5 && fabs(settings_num(txt, "AU_SSS_VOXEL", 1) - 1.0) < 0.5)) {
+        && !(settings_num(txt, "AU_SSS", 1) > 0.5 && fabs(settings_num(txt, "AU_SSS_VOXEL", 1) - 1.0) < 0.5)
+        && settings_num(txt, "AU_DYNAMIC_SHADOWS", 1) < 0.5) {
         vox_atlas_release();
         g_voxState = 0;
         g_voxLastUser[0] = 0;

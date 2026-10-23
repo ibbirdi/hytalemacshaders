@@ -40,7 +40,7 @@ uniform int uHookPTPass;
 #endif
 #if AU_VOXEL_WORLD && AU_VOXEL_ATLAS
 uniform vec2 uHookVoxFeedOffset;    // the feed pass's pixel within each 4x4 block (hook vox_atlas_feed)
-layout(location = 2) out uvec4 auVoxFeed;
+layout(location = 3) out uvec4 auVoxFeed;
 #endif
 
 uniform sampler2D uColorTexture;
@@ -72,8 +72,12 @@ uniform int uHookHalfPass;
 uniform sampler2D uHookHalfGI;
 uniform sampler2D uHookHalfVL;
 layout(location = 1) out vec4 auHalfVL;
+#if AU_VOXELS
+uniform sampler2D uHookHalfSky;     // path tracing: the share of rays that reached the sky
+layout(location = 2) out vec4 auHalfSky;
+#endif
 
-void AU_HalfUpsample(vec2 uv, float distance, out vec4 gi, out vec3 vl)
+void AU_HalfUpsample(vec2 uv, float distance, out vec4 gi, out vec3 vl, out float sky)
 {
     ivec2 size = textureSize(uHookHalfVL, 0);
     vec2 position = uv * vec2(size) - 0.5;
@@ -81,7 +85,8 @@ void AU_HalfUpsample(vec2 uv, float distance, out vec4 gi, out vec3 vl)
     vec2 f = position - vec2(base);
     vec4 giSum = vec4(0.0);
     vec3 vlSum = vec3(0.0);
-    float total = 0.0, closest = 1e9;
+    float skySum = 0.0, total = 0.0, closest = 1e9;
+    sky = 1.0;
     ivec2 best = clamp(base, ivec2(0), size - 1);
     for (int i = 0; i < 4; i++) {
         ivec2 offset = ivec2(i & 1, i >> 1);
@@ -92,15 +97,24 @@ void AU_HalfUpsample(vec2 uv, float distance, out vec4 gi, out vec3 vl)
         if (difference < closest) { closest = difference; best = texel; }
         giSum += texelFetch(uHookHalfGI, texel, 0) * weight;
         vlSum += shafts.rgb * weight;
+#if AU_VOXELS
+        skySum += texelFetch(uHookHalfSky, texel, 0).r * weight;
+#endif
         total += weight;
     }
     if (total > 1e-4) {
         gi = giSum / total;
         vl = vlSum / total;
+#if AU_VOXELS
+        sky = skySum / total;
+#endif
     } else {
         // Every neighbour lies on another surface (thin edges): the closest one's values.
         gi = texelFetch(uHookHalfGI, best, 0);
         vl = texelFetch(uHookHalfVL, best, 0).rgb;
+#if AU_VOXELS
+        sky = texelFetch(uHookHalfSky, best, 0).r;
+#endif
     }
 }
 #endif
@@ -280,9 +294,14 @@ void main()
 #if AU_HALF_FX
     vec4 halfGI = vec4(0.0, 0.0, 0.0, 1.0);
     vec3 halfVL = vec3(0.0);
+    float halfSky = 1.0;
     if (uHookHalfPass == 1) {
         float halfDistance = length(playerPos);
-#if AU_PRESET >= 2 && !AU_VOXELS
+#if AU_VOXELS
+        // Path tracing on a quarter of the pixels: the costliest part of the lighting.
+        if (!hasBloom) halfGI.rgb = AU_GetVoxelGI(uDepthTexture, playerPos, normal, skyLight, halfGI.a, halfSky);
+        auHalfSky = vec4(halfSky);
+#elif AU_PRESET >= 2
 #if AU_SSGI_SELF_HIT_FIX
         vec3 halfPlane = fastNormalFromPosition(playerPos);   // derivatives: outside the branch below
 #else
@@ -295,7 +314,7 @@ void main()
         auHalfVL = vec4(GetVolumetricLight(playerPos / max(halfDistance, 0.0001), halfDistance, false, dither), halfDistance);
         return;
     }
-    if (uHookHalfPass == 2) AU_HalfUpsample(texCoords, length(playerPos), halfGI, halfVL);
+    if (uHookHalfPass == 2) AU_HalfUpsample(texCoords, length(playerPos), halfGI, halfVL, halfSky);
 #endif
 #if AU_AO_METHOD == 1
     // GTAO in place of Hytale's SSAO on solid surfaces (foliage keeps Hytale's): horizon-based
@@ -441,7 +460,10 @@ void main()
     float skyVis = 1.0;
     if (!hasBloom) {
         {
-#if AU_VOXELS
+#if AU_VOXELS && AU_HALF_FX
+            if (uHookHalfPass == 2) { gi = halfGI.rgb; giVisibility = halfGI.a; skyVis = halfSky; }
+            else gi = AU_GetVoxelGI(uDepthTexture, playerPos, normal, skyLight, giVisibility, skyVis);
+#elif AU_VOXELS
             gi = AU_GetVoxelGI(uDepthTexture, playerPos, normal, skyLight, giVisibility, skyVis);
 #elif AU_HALF_FX
             if (uHookHalfPass == 2) { gi = halfGI.rgb; giVisibility = halfGI.a; }

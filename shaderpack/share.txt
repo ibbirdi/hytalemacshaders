@@ -10,3 +10,4 @@ DeferredFS uDepthTexture PostEffectFS uHookDepth 24 raw
 DeferredFS uNormalTexture BloomSelectFS uHookGBuffer1 23 raw
 DeferredFS uNormalTexture PostEffectFS uHookGBuffer1 23 raw
 DeferredFS uColorTexture PostEffectFS uHookGBuffer0 19 raw
+DeferredFS uNormalTexture LightClusteredFS uHookGBuffer1 23 raw
