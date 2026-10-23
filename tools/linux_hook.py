@@ -106,7 +106,10 @@ def atomic_copy(source, target):
 # TAA jitter, half-resolution GI and light shafts, sample counts the temporal filters integrate
 # anyway. Applied once, to settings from before these options existed, so later choices are kept.
 MAC_COMMON = {"AU_TAA_JITTER": "1", "AU_HALF_RES_FX": "1", "AU_HALF_HISTORY": "16", "AU_METALFX": "1",
-              "AU_METALFX_DENOISER": "0", "AU_METALFX_METAL4": "0", "AU_DYNAMIC_SHADOWS": "1", "AU_DYNAMIC_LIGHT_SIZE": "0.6"}
+              "AU_METALFX_DENOISER": "0", "AU_METALFX_METAL4": "1", "AU_DYNAMIC_SHADOWS": "1", "AU_DYNAMIC_LIGHT_SIZE": "0.6"}
+# Changes to settings saved by earlier macOS installations, applied once each (AU_MAC_SETTINGS
+# counts them). 2: MetalFX through Metal 4, as the original queue let the GPU clock drop in game.
+MAC_MIGRATIONS = {2: {"AU_METALFX_METAL4": "1"}}
 MAC_TIERS = {
     # M4 Pro / Max, M5 and later: path tracing on
     "high": {"AU_RENDER_SCALE": "67", "AU_RTX_GI_RAYS": "4", "AU_LIGHTSHAFT_SAMPLES": "16",
@@ -155,6 +158,12 @@ def merge_settings(defaults, previous, dlss_supported=False, mac=MAC):
     values = {match[1]: match[2] for match in re.findall(scalar, previous)}
     if mac and "AU_TAA_JITTER" not in values:
         values.update(mac_defaults())
+    if mac:
+        applied = int(float(values.get("AU_MAC_SETTINGS", 1)))
+        for version, changes in sorted(MAC_MIGRATIONS.items()):
+            if applied < version:
+                values.update(changes)
+        values["AU_MAC_SETTINGS"] = str(max(applied, max(MAC_MIGRATIONS)))
     # Older Linux installers zeroed every DLSS option, including motion/jitter
     # multipliers. Detect that signature without overwriting individual user edits.
     legacy_motion = ("AU_DLSS_JITTER", "AU_DLSS_JITTER_SX", "AU_DLSS_JITTER_SY",

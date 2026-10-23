@@ -68,7 +68,13 @@ on a shared event, then PostEffectFS's resolve mode tonemaps the result onto the
 only with the right jitter and motion signs; on an M5 Pro the right ones give 1.2 px wide edges
 and the wrong ones 3-4 px. It also times the scalers at 2755x1686 -> 4112x2516: 3.9 ms for the
 temporal scaler (4.3 ms through Metal 4), 22 ms for the denoised one (14 ms from 50 percent).
-The original queue measured faster than Metal 4, so **Submit through Metal 4** is off by default.
+
+In game the original queue is the slower one: about 20 seconds after the game comes to the front,
+macOS lowers the GPU clock step by step to its lowest state while the GPU stays busy (P13 to P1,
+16 W to 2 W on an M5 Pro, 40 fps to 20), and it climbs back as soon as MetalFX is off or the game
+goes to the background. Through Metal 4 the clock stays at its top state (55-60 fps at 67
+percent), so **Submit through Metal 4** is on by default; systems before macOS 26 use the
+original queue. The installer turns it on once for earlier installations (`AU_MAC_SETTINGS`).
 
 ## Performance on Apple Silicon
 

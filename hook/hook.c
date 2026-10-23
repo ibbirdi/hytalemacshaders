@@ -3715,7 +3715,7 @@ static void settings_load(void)
 #if AU_HAS_METALFX
     g_setDlssEnabled = settings_num(txt, "AU_METALFX", 0) > 0.5;   // the upscaler on this platform
     g_setMfxDenoise = settings_num(txt, "AU_METALFX_DENOISER", 0) > 0.5;
-    g_setMfxMetal4 = settings_num(txt, "AU_METALFX_METAL4", 0) > 0.5;
+    g_setMfxMetal4 = settings_num(txt, "AU_METALFX_METAL4", 1) > 0.5;
 #else
     g_setDlssEnabled = settings_num(txt, "AU_DLSS", 0) > 0.5;
 #endif

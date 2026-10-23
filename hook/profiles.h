@@ -165,6 +165,7 @@ static void menu_profile_builtin(int selected)
     // (Values of the menu's Render resolution list.)
     static const int renderScale[2][3] = {{58, 67, 77}, {50, 58, 67}};
     menu_profile_set("AU_METALFX", 1);
+    menu_profile_set("AU_METALFX_METAL4", 1);
     menu_profile_set("AU_RENDER_SCALE", renderScale[rtx][apple_gpu_tier()]);
     menu_profile_set("AU_RTX_GI_RAYS", quality[tier].giRays < 4 ? quality[tier].giRays : 4);
     menu_profile_set("AU_LIGHTSHAFT_SAMPLES", quality[tier].shaftSamples < 16 ? quality[tier].shaftSamples : 16);

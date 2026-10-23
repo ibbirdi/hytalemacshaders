@@ -127,6 +127,18 @@ class MacSettingsTests(unittest.TestCase):
         self.assertIn("AU_RTX_GI_RAYS 12", kept)
         self.assertIn("AU_DLSS 0", kept)
 
+    def test_mac_migrations_apply_once(self):
+        defaults = self.DEFAULTS + "#define AU_METALFX_METAL4 1\n#define AU_MAC_SETTINGS 2\n"
+        # An installation from before the migrations had chosen the original queue: Metal 4 now.
+        older = linux_hook.merge_settings(defaults, "#define AU_TAA_JITTER 1\n#define AU_METALFX_METAL4 0\n", mac=True)
+        self.assertIn("AU_METALFX_METAL4 1", older)
+        self.assertIn("AU_MAC_SETTINGS 2", older)
+        # After it, a choice of the original queue stays.
+        kept = linux_hook.merge_settings(defaults, "#define AU_TAA_JITTER 1\n#define AU_METALFX_METAL4 0\n#define AU_MAC_SETTINGS 2\n", mac=True)
+        self.assertIn("AU_METALFX_METAL4 0", kept)
+        linux = linux_hook.merge_settings(defaults, "#define AU_METALFX_METAL4 0\n", mac=False)
+        self.assertIn("AU_METALFX_METAL4 0", linux)
+
     def test_chip_classes(self):
         self.assertEqual(linux_hook.mac_tier("Apple M5 Pro"), "high")
         self.assertEqual(linux_hook.mac_tier("Apple M4 Max"), "high")
