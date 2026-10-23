@@ -170,6 +170,11 @@ static void menu_profile_builtin(int selected)
     menu_profile_set("AU_LIGHTSHAFT_SAMPLES", quality[tier].shaftSamples < 16 ? quality[tier].shaftSamples : 16);
     menu_profile_set("AU_SHADOW_SAMPLES", quality[tier].shadowSamples < 16 ? quality[tier].shadowSamples : 16);
     menu_profile_set("AU_FAR_SHADOW_STEPS", quality[tier].farSteps < 24 ? quality[tier].farSteps : 24);
+    // Path tracing (voxel GI through the hook's atlas) in the two highest RTX profiles on the fast
+    // chips; every Mac can still switch it on in the Path tracing tab.
+    int tracing = rtx && tier >= 4 && apple_gpu_tier() == 2;
+    menu_profile_set("AU_PATH_TRACING", tracing);
+    menu_profile_set("AU_PT_RAYS", 2);
 #endif
 }
 

@@ -2,9 +2,12 @@
 
 Aurora Shaders for Hytale on **Apple Silicon Macs** (M1 and later), tuned for macOS: Apple
 **MetalFX** upscaling (and its denoised scaler), half-resolution GI and light shafts, TAA
-jitter, and path tracing / voxel scattering without image load/store. Settings start from the
-chip it runs on: an M5 Pro renders at 67 percent of the window, an M1 Pro at 58 percent with
-lighter shadows, an M1 or M2 at 50 percent with the non-RTX preset.
+jitter, and path tracing / voxel scattering without image load/store. The same pack runs on every
+Apple Silicon Mac; only its starting settings follow the chip, and everything stays adjustable in
+the menu: an M5 Pro starts with path tracing at 67 percent render size, an M1 Pro at 58 percent
+with lighter shadows, an M1 or M2 at 50 percent with the non-RTX preset. The **Profiles** tab
+switches any Mac to any level; the two highest RTX profiles turn path tracing on for M4 Pro / Max,
+M5 and later, and the **Path tracing** tab turns it on anywhere.
 
 ## Install in one command
 

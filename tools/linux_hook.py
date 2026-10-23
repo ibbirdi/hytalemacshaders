@@ -107,9 +107,9 @@ def atomic_copy(source, target):
 # anyway. Applied once, to settings from before these options existed, so later choices are kept.
 MAC_COMMON = {"AU_TAA_JITTER": "1", "AU_HALF_RES_FX": "1", "AU_METALFX": "1"}
 MAC_TIERS = {
-    # M4 Pro / Max, M5 and later
+    # M4 Pro / Max, M5 and later: path tracing on
     "high": {"AU_RENDER_SCALE": "67", "AU_RTX_GI_RAYS": "4", "AU_LIGHTSHAFT_SAMPLES": "16",
-             "AU_SHADOW_SAMPLES": "16", "AU_FAR_SHADOW_STEPS": "24"},
+             "AU_SHADOW_SAMPLES": "16", "AU_FAR_SHADOW_STEPS": "24", "AU_PATH_TRACING": "1", "AU_PT_RAYS": "2"},
     # M1 / M2 / M3 Pro and Max, M3, M4
     "medium": {"AU_RENDER_SCALE": "58", "AU_RTX_GI_RAYS": "4", "AU_LIGHTSHAFT_SAMPLES": "12",
                "AU_SHADOW_SAMPLES": "12", "AU_FAR_SHADOW_STEPS": "16", "AU_CONTACT_SHADOW_STEPS": "12",
