@@ -106,6 +106,7 @@ AU_CLOTH_TRANSMIT | Sun through curtains / cloth | range 0.0 2.0 0.1 | 0.5
 AU_RTX_GI_STRENGTH | Bounce light | range 0.0 3.0 0.1 | 1.0
 AU_RTX_GI_AO | Ray-traced AO | range 0.0 1.0 0.05 | 0.55
 AU_RTX_GI_RAYS | Screen-space rays (no PT) | range 4 32 4 | 8
+AU_HALF_RES_FX | Half-resolution GI and light shafts | bool | 0 | Traces the screen-space GI and the light shafts at a quarter of the pixels and fills in the rest from the nearest samples on the same surface. A large saving at Retina and 4K sizes; the TAA hides the softer result. Not with GI denoising or path tracing.
 AU_RTX_GI_RADIUS | Screen-space reach (no PT) | range 2.0 16.0 0.5 | 8.0
 AU_RTX_SSR_STEPS | Material reflection steps | range 8 64 4 | 32
 AU_SSR_REFINED | Refined reflections | bool | 1 | Pins every reflection hit to the surface (no stepping), rejects the backs of surfaces, fades uncertain hits to the sky, and blurs rough reflections more the further the reflected surface is. Off restores the previous reflections.

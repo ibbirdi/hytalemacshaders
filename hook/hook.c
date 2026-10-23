@@ -529,6 +529,7 @@ typedef struct {
     GLint locSSSMasks, locSSSReady;
     GLint locEmissionReady;
     GLint locUpscale;        // uHookUpscale (BasicFS): set while it scales the finished frame to the window
+    GLint locHalfPass;       // uHookHalfPass (DeferredFS with AU_HALF_RES_FX, see half_draw)
     int shareGen, shareSrc;  // cached: is this program the source of a texture share
     int shareLocGen;         // g_shareGen the destination sampler locations below were looked up for
     GLint shareLoc[16];
@@ -1165,6 +1166,8 @@ static void gi_bind(int temporal, int raw, int divisor, int compact, int lights)
 static void profile_use(const char *name);
 static void gi_release(void);
 static void gi_draw(GLenum mode, GLint first, GLsizei count);
+static int g_setHalfRes;
+static void half_draw(ProgRec *program, GLenum mode, GLint first, GLsizei count);
 static GLuint g_dlssProg; // the program writing the DLSS inputs (PostEffectFS, see dlss_draw)
 static int g_dlssRR;
 static int g_dlssPending; // inputs written this frame, DLSS runs at the present (dlss_present)
@@ -1215,6 +1218,7 @@ AU_GL_EXPORT void APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count)
     share_draw_capture();
     if (g_matProgRec) materials_draw_check();
     if (program && program->kind == PK_POST_EFFECT) g_sceneFrame = g_frame;
+    if (program && program->locHalfPass >= 0 && g_setHalfRes) { half_draw(program, mode, first, count); return; }
     if (g_giProg && g_giProg == g_curProg) { gi_draw(mode, first, count); return; }
     if (g_dlssProg && g_dlssProg == g_curProg) { dlss_draw(mode, first, count); return; }
     if (g_dlssPending && dlss_present()) return;
@@ -1703,6 +1707,171 @@ static void gi_draw(GLenum mode, GLint first, GLsizei count)
     r_glUniform1i(program->locPTPass, 0);
     if (program->locLocalLightTiles >= 0) r_glUniform1i(program->locLocalLightTiles, 0);
 }
+// ----------------------------------------------------------------------------------------
+// Half-resolution effects (AU_HALF_RES_FX). DeferredFS draws twice: first into the hook's two
+// half-size RGBA16F targets (uHookHalfPass 1: screen-space GI and visibility, light shafts and
+// distance), then as usual at full size (pass 2), reading them back through a depth-aware
+// upsample. A quarter of the pixels trace the rays; the TAA hides the softer result.
+
+#define HALF_UNIT_GI (HOOK_UNIT_BASE + 4)
+#define HALF_UNIT_VL (HOOK_UNIT_BASE + 5)
+static GLuint g_halfFbo, g_halfTex[2];
+static int g_halfW, g_halfH, g_halfFailed;
+
+static struct {
+    void (APIENTRY *GenFramebuffers)(GLsizei, GLuint *);
+    void (APIENTRY *BindFramebuffer)(GLenum, GLuint);
+    void (APIENTRY *FramebufferTexture2D)(GLenum, GLenum, GLenum, GLuint, GLint);
+    GLenum (APIENTRY *CheckFramebufferStatus)(GLenum);
+    void (APIENTRY *DrawBuffers)(GLsizei, const GLenum *);
+    void (APIENTRY *ClearBufferfv)(GLenum, GLint, const GLfloat *);
+    void (APIENTRY *Viewport)(GLint, GLint, GLsizei, GLsizei);
+    GLboolean (APIENTRY *IsEnabled)(GLenum);
+    void (APIENTRY *Enable)(GLenum);
+    void (APIENTRY *Disable)(GLenum);
+    void (APIENTRY *ColorMask)(GLboolean, GLboolean, GLboolean, GLboolean);
+    void (APIENTRY *GetBooleanv)(GLenum, GLboolean *);
+    void (APIENTRY *GenTextures)(GLsizei, GLuint *);
+    void (APIENTRY *DeleteTextures)(GLsizei, const GLuint *);
+    void (APIENTRY *TexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
+    void (APIENTRY *TexParameteri)(GLenum, GLenum, GLint);
+} hgl;   // GL entry points of the hook's own offscreen passes
+
+static void *hook_gl_proc(const char *name)
+{
+    void *proc = (void *)real_wglGetProcAddress(name);
+    if (!proc || (uintptr_t)proc <= 3 || proc == (void *)-1) proc = (void *)GetProcAddress(g_real, name);
+    return proc;
+}
+
+static int hook_gl_ready(void)
+{
+    static int state;
+    if (state) return state > 0;
+    state = -1;
+#define HGL(field, name) *(void **)&hgl.field = hook_gl_proc(name); if (!hgl.field) return 0;
+    HGL(GenFramebuffers, "glGenFramebuffers") HGL(BindFramebuffer, "glBindFramebuffer")
+    HGL(FramebufferTexture2D, "glFramebufferTexture2D") HGL(CheckFramebufferStatus, "glCheckFramebufferStatus")
+    HGL(DrawBuffers, "glDrawBuffers") HGL(ClearBufferfv, "glClearBufferfv") HGL(Viewport, "glViewport")
+    HGL(IsEnabled, "glIsEnabled") HGL(Enable, "glEnable") HGL(Disable, "glDisable") HGL(ColorMask, "glColorMask")
+    HGL(GetBooleanv, "glGetBooleanv") HGL(GenTextures, "glGenTextures") HGL(DeleteTextures, "glDeleteTextures")
+    HGL(TexImage2D, "glTexImage2D") HGL(TexParameteri, "glTexParameteri")
+#undef HGL
+    state = 1;
+    return 1;
+}
+
+// Hook passes draw with the game's program but without its blending, scissor or depth test, and
+// put back whatever they changed.
+typedef struct { GLint framebuffer, viewport[4]; GLboolean blend, scissor, depth, stencil, cull, mask[4]; } HookPassState;
+static HookPassState hook_pass_begin(GLuint framebuffer, int width, int height)
+{
+    HookPassState state;
+    r_glGetIntegerv(0x8CA6 /*GL_DRAW_FRAMEBUFFER_BINDING*/, &state.framebuffer);
+    r_glGetIntegerv(GL_VIEWPORT, state.viewport);
+    const GLenum caps[5] = {0x0BE2 /*BLEND*/, 0x0C11 /*SCISSOR*/, 0x0B71 /*DEPTH*/, 0x0B90 /*STENCIL*/, 0x0B44 /*CULL*/};
+    GLboolean *enabled[5] = {&state.blend, &state.scissor, &state.depth, &state.stencil, &state.cull};
+    for (int i = 0; i < 5; i++) if ((*enabled[i] = hgl.IsEnabled(caps[i]))) hgl.Disable(caps[i]);
+    hgl.GetBooleanv(0x0C23 /*COLOR_WRITEMASK*/, state.mask);
+    hgl.ColorMask(1, 1, 1, 1);
+    hgl.BindFramebuffer(0x8CA9 /*DRAW_FRAMEBUFFER*/, framebuffer);
+    hgl.Viewport(0, 0, width, height);
+    return state;
+}
+
+static void hook_pass_end(const HookPassState *state)
+{
+    hgl.BindFramebuffer(0x8CA9 /*DRAW_FRAMEBUFFER*/, (GLuint)state->framebuffer);
+    hgl.Viewport(state->viewport[0], state->viewport[1], state->viewport[2], state->viewport[3]);
+    const GLenum caps[5] = {0x0BE2, 0x0C11, 0x0B71, 0x0B90, 0x0B44};
+    const GLboolean enabled[5] = {state->blend, state->scissor, state->depth, state->stencil, state->cull};
+    for (int i = 0; i < 5; i++) if (enabled[i]) hgl.Enable(caps[i]);
+    hgl.ColorMask(state->mask[0], state->mask[1], state->mask[2], state->mask[3]);
+}
+
+static void hook_bind_unit(GLuint unit, GLuint texture)
+{
+    r_glActiveTexture(GL_TEXTURE0 + unit);
+    r_glBindTexture(GL_TEXTURE_2D, texture);
+    if (r_glBindSampler) r_glBindSampler(unit, 0);
+    g_units[unit].target = GL_TEXTURE_2D;
+    g_units[unit].tex = texture;
+    g_units[unit].sampler = 0;
+    r_glActiveTexture(GL_TEXTURE0 + g_activeUnit);
+}
+
+static void half_release(void)
+{
+    if (!g_halfTex[0]) return;
+    hook_bind_unit(HALF_UNIT_GI, 0);
+    hook_bind_unit(HALF_UNIT_VL, 0);
+    hgl.DeleteTextures(2, g_halfTex);
+    g_halfTex[0] = g_halfTex[1] = 0;
+    g_halfW = g_halfH = 0;
+}
+
+static int half_targets(int width, int height)
+{
+    if (g_halfFailed || !hook_gl_ready()) return 0;
+    if (g_halfTex[0] && width == g_halfW && height == g_halfH) return 1;
+    half_release();
+    if (!g_halfFbo) hgl.GenFramebuffers(1, &g_halfFbo);
+    GLint previousTexture = 0, previousFramebuffer = 0;
+    r_glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture);
+    r_glGetIntegerv(0x8CA6 /*GL_DRAW_FRAMEBUFFER_BINDING*/, &previousFramebuffer);
+    hgl.GenTextures(2, g_halfTex);
+    hgl.BindFramebuffer(0x8CA9 /*DRAW_FRAMEBUFFER*/, g_halfFbo);
+    for (int i = 0; i < 2; i++) {
+        r_glBindTexture(GL_TEXTURE_2D, g_halfTex[i]);
+        hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        hgl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        hgl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, NULL);
+        hgl.FramebufferTexture2D(0x8CA9, 0x8CE0 /*COLOR_ATTACHMENT0*/ + i, GL_TEXTURE_2D, g_halfTex[i], 0);
+    }
+    static const GLenum buffers[2] = {0x8CE0, 0x8CE1};   // COLOR_ATTACHMENT0, 1
+    hgl.DrawBuffers(2, buffers);
+    GLenum status = hgl.CheckFramebufferStatus(0x8CA9);
+    hgl.BindFramebuffer(0x8CA9, (GLuint)previousFramebuffer);
+    r_glBindTexture(GL_TEXTURE_2D, (GLuint)previousTexture);
+    if (status != 0x8CD5 /*FRAMEBUFFER_COMPLETE*/) {
+        logf_("half resolution: framebuffer incomplete (0x%x), effects stay at full size", status);
+        half_release();
+        g_halfFailed = 1;
+        return 0;
+    }
+    g_halfW = width;
+    g_halfH = height;
+    logf_("half resolution: GI and light shafts at %dx%d", width, height);
+    return 1;
+}
+
+static void half_draw(ProgRec *program, GLenum mode, GLint first, GLsizei count)
+{
+    GLint viewport[4] = {0};
+    r_glGetIntegerv(GL_VIEWPORT, viewport);
+    int width = (viewport[2] + 1) / 2, height = (viewport[3] + 1) / 2;
+    if (width < 1 || height < 1 || !half_targets(width, height)) {
+        r_glUniform1i(program->locHalfPass, 0);
+        r_glDrawArrays(mode, first, count);
+        return;
+    }
+    static const GLfloat clearGI[4] = {0.0f, 0.0f, 0.0f, 1.0f}, clearShafts[4] = {0.0f, 0.0f, 0.0f, 1e6f};
+    profile_use("Half-res GI + light shafts");
+    HookPassState state = hook_pass_begin(g_halfFbo, width, height);
+    hgl.ClearBufferfv(0x1800 /*COLOR*/, 0, clearGI);
+    hgl.ClearBufferfv(0x1800 /*COLOR*/, 1, clearShafts);
+    r_glUniform1i(program->locHalfPass, 1);
+    r_glDrawArrays(mode, first, count);
+    hook_pass_end(&state);
+    hook_bind_unit(HALF_UNIT_GI, g_halfTex[0]);
+    hook_bind_unit(HALF_UNIT_VL, g_halfTex[1]);
+    profile_use(program->pname);
+    r_glUniform1i(program->locHalfPass, 2);
+    r_glDrawArrays(mode, first, count);
+    r_glUniform1i(program->locHalfPass, 0);
+}
+
 // ----------------------------------------------------------------------------------------
 // Block materials. Hytale's terrain has no material data, so the hook reads its block atlas
 // (the texture array MapChunkFS samples as uTexture) once, fingerprints every 32x32 tile and
@@ -2709,6 +2878,14 @@ static void check_extras(GLuint prog, ProgRec *p)
     if (p->locMaterialLOD >= 0) p->hasExtras = 1;
     p->locEmissionReady = r_glGetUniformLocation(prog, "uHookEmissionReady");
     p->locUpscale = r_glGetUniformLocation(prog, "uHookUpscale");
+    p->locHalfPass = r_glGetUniformLocation(prog, "uHookHalfPass");
+    if (p->locHalfPass >= 0) {
+        GLint gi = r_glGetUniformLocation(prog, "uHookHalfGI"), shafts = r_glGetUniformLocation(prog, "uHookHalfVL");
+        if (gi >= 0) r_glUniform1i(gi, HALF_UNIT_GI);
+        if (shafts >= 0) r_glUniform1i(shafts, HALF_UNIT_VL);
+        r_glUniform1i(p->locHalfPass, 0);
+        p->hasExtras = 1;
+    }
     p->temporalGeometry = temporal_geometry(p);
     p->kind = !strcmp(p->pname, "PostEffectFS") ? PK_POST_EFFECT : !strcmp(p->pname, "TemporalAAFS") ? PK_TAA
             : !strcmp(p->pname, "BasicFS") ? PK_BASIC : !strcmp(p->pname, "DeferredFS") ? PK_DEFERRED : PK_OTHER;
@@ -2932,6 +3109,7 @@ static void settings_load(void)
     g_setDlssEnabled = settings_num(txt, "AU_DLSS", 0) > 0.5;
     g_setTAAJitter = settings_num(txt, "AU_TAA", 1) > 0.5 && settings_num(txt, "AU_TAA_JITTER", 0) > 0.5;
     g_setUpscaleSharpness = fmin(1.0, fmax(0.0, settings_num(txt, "AU_UPSCALE_SHARPNESS", 0.3)));
+    g_setHalfRes = settings_num(txt, "AU_HALF_RES_FX", 0) > 0.5;
     int previousFrameGen = g_setFrameGen;
     g_setFrameGen = (int)settings_num(txt, "AU_DLSS_FRAMEGEN", 0);
     if (g_setFrameGen < 0 || g_setFrameGen > 5) g_setFrameGen = 0;

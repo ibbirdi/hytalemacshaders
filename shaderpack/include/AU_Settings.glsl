@@ -181,6 +181,7 @@
 #define AU_RAIN_PUDDLE_STRENGTH 1.0
 
 // ---- RTX preset ----------------------------------------------------------------------
+#define AU_HALF_RES_FX 0              // hook: screen-space GI and light shafts at half resolution, upsampled by depth
 #define AU_RTX_GI_RAYS 8
 #define AU_RTX_GI_RADIUS 8.0
 #define AU_RTX_GI_STRENGTH 1.0

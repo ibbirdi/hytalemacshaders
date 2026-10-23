@@ -56,7 +56,50 @@ in vec2 fragTexCoords;
 flat in vec3 auSkyLightCube[6];   // the sky's ambient light per facing (ScreenVS, AU_SkyLight.glsl)
 #endif
 
-out vec4 outColor;
+layout(location = 0) out vec4 outColor;
+
+// Half resolution (AU_HALF_RES_FX, hook half_draw): the hook draws this pass twice. Pass 1 goes
+// into its two half-size targets: the screen-space GI (rgb, visibility in alpha) and the light
+// shafts (rgb, distance in alpha). Pass 2, the full-size lighting, reads them back through an
+// upsample weighted by how close each half-size sample's distance is to the pixel's.
+#define AU_HALF_FX (AU_HALF_RES_FX && !AU_VOXEL_WORLD && !AU_GI_DENOISE)
+#if AU_HALF_FX
+uniform int uHookHalfPass;
+uniform sampler2D uHookHalfGI;
+uniform sampler2D uHookHalfVL;
+layout(location = 1) out vec4 auHalfVL;
+
+void AU_HalfUpsample(vec2 uv, float distance, out vec4 gi, out vec3 vl)
+{
+    ivec2 size = textureSize(uHookHalfVL, 0);
+    vec2 position = uv * vec2(size) - 0.5;
+    ivec2 base = ivec2(floor(position));
+    vec2 f = position - vec2(base);
+    vec4 giSum = vec4(0.0);
+    vec3 vlSum = vec3(0.0);
+    float total = 0.0, closest = 1e9;
+    ivec2 best = clamp(base, ivec2(0), size - 1);
+    for (int i = 0; i < 4; i++) {
+        ivec2 offset = ivec2(i & 1, i >> 1);
+        ivec2 texel = clamp(base + offset, ivec2(0), size - 1);
+        vec4 shafts = texelFetch(uHookHalfVL, texel, 0);
+        float difference = abs(shafts.a - distance) / max(distance, 0.5);
+        float weight = (offset.x == 1 ? f.x : 1.0 - f.x) * (offset.y == 1 ? f.y : 1.0 - f.y) * exp(-difference * 40.0);
+        if (difference < closest) { closest = difference; best = texel; }
+        giSum += texelFetch(uHookHalfGI, texel, 0) * weight;
+        vlSum += shafts.rgb * weight;
+        total += weight;
+    }
+    if (total > 1e-4) {
+        gi = giSum / total;
+        vl = vlSum / total;
+    } else {
+        // Every neighbour lies on another surface (thin edges): the closest one's values.
+        gi = texelFetch(uHookHalfGI, best, 0);
+        vl = texelFetch(uHookHalfVL, best, 0).rgb;
+    }
+}
+#endif
 
 float getShadowFactor(vec2 texCoords)
 {
@@ -218,6 +261,26 @@ void main()
 
     vec2 surfaceFootprint = AU_SurfaceFootprint(normal, gbuffer0.rgb);
     float dither = GetDither(gl_FragCoord.xy);
+#if AU_HALF_FX
+    vec4 halfGI = vec4(0.0, 0.0, 0.0, 1.0);
+    vec3 halfVL = vec3(0.0);
+    if (uHookHalfPass == 1) {
+        float halfDistance = length(playerPos);
+#if AU_PRESET >= 2
+#if AU_SSGI_SELF_HIT_FIX
+        vec3 halfPlane = fastNormalFromPosition(playerPos);   // derivatives: outside the branch below
+#else
+        vec3 halfPlane = normal;
+#endif
+        if (!hasBloom) halfGI.rgb = AU_GetSSGI(uDepthTexture, playerPos, normal, halfPlane, dither, halfGI.a);
+#endif
+        if (IsCameraUnderwater > 0.5) lightColor *= vec3(0.45, 0.75, 1.25);   // as below
+        outColor = halfGI;
+        auHalfVL = vec4(GetVolumetricLight(playerPos / max(halfDistance, 0.0001), halfDistance, false, dither), halfDistance);
+        return;
+    }
+    if (uHookHalfPass == 2) AU_HalfUpsample(texCoords, length(playerPos), halfGI, halfVL);
+#endif
 #if AU_AO_METHOD == 1
     // GTAO in place of Hytale's SSAO on solid surfaces (foliage keeps Hytale's): horizon-based
     // visibility from the depth buffer, with the light bounced between the occluding faces.
@@ -364,6 +427,9 @@ void main()
         {
 #if AU_VOXELS
             gi = AU_GetVoxelGI(uDepthTexture, playerPos, normal, skyLight, giVisibility, skyVis);
+#elif AU_HALF_FX
+            if (uHookHalfPass == 2) { gi = halfGI.rgb; giVisibility = halfGI.a; }
+            else gi = AU_GetSSGI(uDepthTexture, playerPos, normal, historyNormal, dither, giVisibility);
 #else
             gi = AU_GetSSGI(uDepthTexture, playerPos, normal, historyNormal, dither, giVisibility);
 #endif
@@ -564,6 +630,10 @@ void main()
 
     // Volumetric light shafts in front of this surface.
     float lViewPos = length(playerPos);
+#if AU_HALF_FX
+    if (uHookHalfPass == 2) color = AU_AddVL(color, halfVL);
+    else
+#endif
     color = AU_AddVL(color, GetVolumetricLight(playerPos / max(lViewPos, 0.0001), lViewPos, false, dither));
 
 #if AU_DEBUG_CLASS == 11

@@ -259,6 +259,39 @@ static int check_sky_light_pair(int sky, int model, int biome, int preset)
     return valid;
 }
 
+// DeferredFS with half-resolution effects, linked with ScreenVS: the hook's uniforms stay active.
+static int check_half_resolution_pair(int preset)
+{
+    GLuint (APIENTRY *createProgram)(void) = (void *)real_wglGetProcAddress("glCreateProgram");
+    void (APIENTRY *deleteProgram)(GLuint) = (void *)real_wglGetProcAddress("glDeleteProgram");
+    GLuint program = createProgram();
+    int valid = 1;
+    for (int stage = 0; stage < 2; stage++) {
+        char *source = shader_source(stage ? "DeferredFS" : "ScreenVS");
+        source = override_number(source, "AU_HALF_RES_FX", "1");
+        source = override_number(source, "AU_PRESET", preset == 1 ? "1" : "2");
+        source = override_number(source, "AU_GI_DENOISER", "0");
+        source = override_number(source, "AU_LOCAL_LIGHTS", "0");
+        source = override_number(source, "AU_SSS_VOXEL", "0");
+        source = driver_source(source);
+        GLuint shader = r_glCreateShader(stage ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER);
+        const GLchar *pointer = source;
+        r_glShaderSource(shader, 1, &pointer, NULL); r_glCompileShader(shader);
+        GLint compiled = 0; r_glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+        if (!compiled) valid = 0;
+        r_glAttachShader(program, shader); r_glDeleteShader(shader); free(source);
+    }
+    GLint linked = 0;
+    if (valid) { r_glLinkProgram(program); r_glGetProgramiv(program, GL_LINK_STATUS, &linked); }
+    if (!linked || r_glGetUniformLocation(program, "uHookHalfPass") < 0 || r_glGetUniformLocation(program, "uHookHalfVL") < 0
+        || (preset == 2 && r_glGetUniformLocation(program, "uHookHalfGI") < 0)) {
+        fprintf(stderr, "FAIL half-resolution DeferredFS preset=%d: linked=%d, hook uniforms missing\n", preset, linked);
+        valid = 0;
+    }
+    deleteProgram(program);
+    return valid;
+}
+
 static int check_shadow_pair(int method, int shadow, int alpha, int textures)
 {
     GLuint (APIENTRY *createProgram)(void) = (void *)real_wglGetProcAddress("glCreateProgram");
@@ -297,6 +330,74 @@ static int check_shadow_pair(int method, int shadow, int alpha, int textures)
         }
     }
     deleteProgram(program);
+    return valid;
+}
+
+// The hook's half-resolution draw on this driver: a program that writes known values in pass 1
+// and reads them back in pass 2 must end up with them in the game's framebuffer, and the game's
+// framebuffer, viewport, blending and scissor must be as they were.
+static int check_half_draw(void)
+{
+    const char *vertex = "#version 410 core\nvoid main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));gl_Position=vec4(p*2.0-1.0,0.0,1.0);}";
+    const char *fragment = "#version 410 core\nuniform int uHookHalfPass;uniform sampler2D uHookHalfGI;uniform sampler2D uHookHalfVL;"
+        "layout(location=0) out vec4 outColor;layout(location=1) out vec4 auHalfVL;\n"
+        "void main(){if(uHookHalfPass==1){outColor=vec4(0.25,0.5,0.75,1.0);auHalfVL=vec4(0.125,0.0,0.0,2.0);return;}"
+        "if(uHookHalfPass==2){ivec2 p=ivec2(gl_FragCoord.xy)/2;outColor=vec4(texelFetch(uHookHalfGI,p,0).rgb+texelFetch(uHookHalfVL,p,0).rrr,1.0);return;}"
+        "outColor=vec4(1.0,0.0,1.0,1.0);}";
+    GLuint (APIENTRY *createProgram)(void) = (void *)real_wglGetProcAddress("glCreateProgram");
+    void (APIENTRY *genVertexArrays)(GLsizei, GLuint *) = (void *)real_wglGetProcAddress("glGenVertexArrays");
+    void (APIENTRY *bindVertexArray)(GLuint) = (void *)real_wglGetProcAddress("glBindVertexArray");
+    void (APIENTRY *readPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *) = (void *)real_wglGetProcAddress("glReadPixels");
+    void (APIENTRY *scissor)(GLint, GLint, GLsizei, GLsizei) = (void *)real_wglGetProcAddress("glScissor");
+    GLenum (APIENTRY *getError)(void) = (void *)real_wglGetProcAddress("glGetError");
+    r_glActiveTexture = (PFN_glActiveTexture)real_wglGetProcAddress("glActiveTexture");
+    r_glBindTexture = (PFN_glBindTexture)real_wglGetProcAddress("glBindTexture");
+    r_glBindSampler = (PFN_glBindSampler)real_wglGetProcAddress("glBindSampler");
+    r_glDrawArrays = (PFN_glDrawArrays)real_wglGetProcAddress("glDrawArrays");
+    r_glGetIntegerv = (PFN_glGetIntegerv)real_wglGetProcAddress("glGetIntegerv");
+    if (!hook_gl_ready()) { fprintf(stderr, "FAIL half draw: GL entry points\n"); return 0; }
+    GLuint program = createProgram();
+    const char *sources[2] = {vertex, fragment};
+    for (int stage = 0; stage < 2; stage++) {
+        GLuint shader = r_glCreateShader(stage ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER);
+        r_glShaderSource(shader, 1, &sources[stage], NULL); r_glCompileShader(shader);
+        r_glAttachShader(program, shader); r_glDeleteShader(shader);
+    }
+    r_glLinkProgram(program);
+    r_glUseProgram(program);
+    r_glUniform1i(r_glGetUniformLocation(program, "uHookHalfGI"), HALF_UNIT_GI);
+    r_glUniform1i(r_glGetUniformLocation(program, "uHookHalfVL"), HALF_UNIT_VL);
+    GLuint vertexArray, target, framebuffer;
+    genVertexArrays(1, &vertexArray); bindVertexArray(vertexArray);
+    hgl.GenTextures(1, &target);
+    r_glBindTexture(GL_TEXTURE_2D, target);
+    hgl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 64, 48, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    r_glBindTexture(GL_TEXTURE_2D, 0);
+    hgl.GenFramebuffers(1, &framebuffer);
+    hgl.BindFramebuffer(0x8D40 /*FRAMEBUFFER*/, framebuffer);
+    hgl.FramebufferTexture2D(0x8D40, 0x8CE0, GL_TEXTURE_2D, target, 0);
+    hgl.Viewport(0, 0, 64, 48);
+    hgl.Enable(0x0BE2 /*BLEND*/);
+    hgl.Enable(0x0C11 /*SCISSOR*/);
+    scissor(0, 0, 64, 48);
+    ProgRec record = {0};
+    record.locHalfPass = r_glGetUniformLocation(program, "uHookHalfPass");
+    snprintf(record.pname, sizeof record.pname, "DeferredFS");
+    half_draw(&record, 0x0004 /*TRIANGLES*/, 0, 3);
+    unsigned char pixel[4] = {0};
+    GLint boundFramebuffer = -1, viewport[4] = {0};
+    r_glGetIntegerv(0x8CA6, &boundFramebuffer);
+    r_glGetIntegerv(GL_VIEWPORT, viewport);
+    readPixels(10, 10, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    int valid = abs(pixel[0] - 96) <= 2 && abs(pixel[1] - 159) <= 2 && abs(pixel[2] - 223) <= 2
+             && boundFramebuffer == (GLint)framebuffer && viewport[2] == 64 && viewport[3] == 48
+             && hgl.IsEnabled(0x0BE2) && hgl.IsEnabled(0x0C11) && g_halfW == 32 && g_halfH == 24 && getError() == 0;
+    if (!valid) fprintf(stderr, "FAIL half draw: pixel %d %d %d, framebuffer %d, viewport %dx%d, half %dx%d\n",
+                        pixel[0], pixel[1], pixel[2], boundFramebuffer, viewport[2], viewport[3], g_halfW, g_halfH);
+    hgl.Disable(0x0BE2);
+    hgl.Disable(0x0C11);
+    hgl.BindFramebuffer(0x8D40, 0);
+    half_release();
     return valid;
 }
 
@@ -366,6 +467,7 @@ int main(int argumentCount, char **arguments)
     GET_GL(glUniform1i);
     GET_GL(glUniform1f);
     int tested = 0, failures = 0;
+    failures += !check_half_draw(); tested++;
     for (int sunlight = 0; sunlight < 2; sunlight++)
     for (int preset = 1; preset <= 2; preset++)
     for (int method = 0; method < 3; method++)
@@ -592,6 +694,21 @@ int main(int argumentCount, char **arguments)
         char *text = shader_source(programs[program]);
         text = override_number(text, "AU_DLSS", dlss ? "1" : "0");
         failures += !check_source(programs[program], text); tested++;
+    }
+    for (int preset = 1; preset <= 2; preset++) { failures += !check_half_resolution_pair(preset); tested += 2; }
+    for (int half = 0; half < 2; half++)
+    for (int preset = 1; preset <= 2; preset++)
+    for (int selfHit = 0; selfHit < 2; selfHit++)
+    for (int shafts = 0; shafts < 2; shafts++) {
+        char *text = shader_source("DeferredFS");
+        text = override_number(text, "AU_HALF_RES_FX", half ? "1" : "0");
+        text = override_number(text, "AU_PRESET", preset == 1 ? "1" : "2");
+        text = override_number(text, "AU_SSGI_SELF_HIT_FIX", selfHit ? "1" : "0");
+        text = override_number(text, "AU_LIGHTSHAFTS", shafts ? "1" : "0");
+        text = override_number(text, "AU_GI_DENOISER", "0");
+        text = override_number(text, "AU_LOCAL_LIGHTS", "0");
+        char label[100]; snprintf(label, sizeof(label), "Half-res effects half=%d preset=%d self-hit=%d shafts=%d", half, preset, selfHit, shafts);
+        failures += !check_source(label, text); tested++;
     }
     for (int array = 0; array < 2; array++)
     for (int alpha = 0; alpha < 2; alpha++) {
