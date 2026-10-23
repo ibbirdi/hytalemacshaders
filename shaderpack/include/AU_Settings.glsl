@@ -270,6 +270,8 @@
 #define AU_DLSS_DEPTH_HW 0            // hand DLSS hardware-style (non-linear) depth instead of linear
 #define AU_TAA_BLEND 0.93             // history weight (higher = smoother, softer motion)
 #define AU_TAA_CLIP 1.25              // neighbourhood variance clip (lower = less ghosting)
+#define AU_TAA_JITTER 0               // hook: sub-pixel camera jitter for the TAA when no upscaler runs
+#define AU_UPSCALE_SHARPNESS 0.3      // hook: sharpening of the bicubic scale-to-window (Hytale Render Scale < 100)
 #define AU_SHARPENING 2               // image sharpening (0-10)
 
 #define AU_DEBUG_CLASS 0

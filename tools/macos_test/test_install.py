@@ -90,5 +90,29 @@ class MacInstallTests(unittest.TestCase):
             self.assertFalse((client / ".aurora/signature").exists())
 
 
+class MacSettingsTests(unittest.TestCase):
+    DEFAULTS = "#define AU_TAA_JITTER 0\n#define AU_METALFX 0\n#define AU_RENDER_SCALE 0\n#define AU_RTX_GI_RAYS 8\n#define AU_DLSS 0\n"
+
+    def test_mac_starting_point_applies_once(self):
+        fresh = linux_hook.merge_settings(self.DEFAULTS, "", mac=True)
+        self.assertIn("AU_METALFX 1", fresh)
+        self.assertIn("AU_RENDER_SCALE 67", fresh)
+        self.assertIn("AU_RTX_GI_RAYS 4", fresh)
+        # Settings from before the macOS options get the starting point; later choices are kept.
+        older = linux_hook.merge_settings(self.DEFAULTS, "#define AU_RTX_GI_RAYS 12\n", mac=True)
+        self.assertIn("AU_RTX_GI_RAYS 4", older)
+        chosen = "#define AU_TAA_JITTER 0\n#define AU_METALFX 0\n#define AU_RENDER_SCALE 85\n#define AU_RTX_GI_RAYS 12\n"
+        kept = linux_hook.merge_settings(self.DEFAULTS, chosen, mac=True)
+        self.assertIn("AU_METALFX 0", kept)
+        self.assertIn("AU_RENDER_SCALE 85", kept)
+        self.assertIn("AU_RTX_GI_RAYS 12", kept)
+        self.assertIn("AU_DLSS 0", kept)
+
+    def test_linux_keeps_render_scale_off_without_dlss(self):
+        merged = linux_hook.merge_settings(self.DEFAULTS, "#define AU_RENDER_SCALE 67\n", mac=False)
+        self.assertIn("AU_RENDER_SCALE 0", merged)
+        self.assertIn("AU_TAA_JITTER 0", merged)
+
+
 if __name__ == "__main__":
     unittest.main()

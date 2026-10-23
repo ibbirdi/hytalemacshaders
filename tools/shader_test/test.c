@@ -1,6 +1,70 @@
 #include "../../hook/hook.c"
 #undef NDEBUG
 #include <assert.h>
+#include <ctype.h>
+#ifdef __APPLE__
+// macOS: a headless OpenGL 4.1 core context from CGL, and Apple's GLSL compiler.
+#include <OpenGL/OpenGL.h>
+static void *g_appleGL;
+static PROC apple_gl_proc(const char *name) { return (PROC)dlsym(g_appleGL, name); }
+#endif
+
+#ifdef __APPLE__
+// Apple's preprocessor rejects identifiers no #define names in #if lines, where other drivers read
+// 0. The game's CPU defines name them all at run time; here the ones the test leaves out are 0.
+static void define_missing(const char *source, Str *out)
+{
+    char seen[256][64];
+    int count = 0;
+    for (const char *line = source; line && *line; line = strchr(line, '\n') ? strchr(line, '\n') + 1 : NULL) {
+        const char *text = line + strspn(line, " \t");
+        if (strncmp(text, "#if ", 4) && strncmp(text, "#elif ", 6)) continue;
+        const char *end = strchr(text, '\n');
+        if (!end) end = text + strlen(text);
+        const char *comment = strstr(text, "//");
+        if (comment && comment < end) end = comment;
+        for (const char *c = text + (text[1] == 'i' ? 3 : 5); c < end; ) {
+            if (!(isalpha((unsigned char)*c) || *c == '_')) { c++; continue; }
+            const char *start = c;
+            while (c < end && (isalnum((unsigned char)*c) || *c == '_')) c++;
+            size_t length = (size_t)(c - start);
+            if (length >= 64 || (length == 7 && !strncmp(start, "defined", 7))) continue;
+            char name[64], pattern[80];
+            memcpy(name, start, length);
+            name[length] = 0;
+            snprintf(pattern, sizeof pattern, "#define %s", name);
+            int known = 0;
+            for (const char *hit = strstr(source, pattern); hit && !known; hit = strstr(hit + 1, pattern))
+                known = !isalnum((unsigned char)hit[strlen(pattern)]) && hit[strlen(pattern)] != '_';
+            for (int index = 0; index < count && !known; index++) known = !strcmp(seen[index], name);
+            if (known || count >= 256) continue;
+            strcpy(seen[count++], name);
+            str_cstr(out, "#ifndef "); str_cstr(out, name); str_cstr(out, "\n#define "); str_cstr(out, name); str_cstr(out, " 0\n#endif\n");
+        }
+    }
+}
+#endif
+
+// The sources as the hook hands them to the driver (on macOS with #extension lines hoisted).
+static char *driver_source(char *source)
+{
+#ifdef __APPLE__
+    Str hoisted = {0};
+    hoist_extensions(source, &hoisted);
+    free(source);
+    char *body = strchr(hoisted.p, '\n');
+    while (body && !strncmp(body + 1, "#extension", 10)) body = strchr(body + 1, '\n');
+    if (!body) return hoisted.p;
+    Str output = {0};
+    str_add(&output, hoisted.p, (size_t)(body + 1 - hoisted.p));
+    define_missing(hoisted.p, &output);
+    str_cstr(&output, body + 1);
+    free(hoisted.p);
+    return output.p;
+#else
+    return source;
+#endif
+}
 
 static char *override_number(char *source, const char *name, const char *number)
 {
@@ -37,11 +101,12 @@ static char *shader_source(const char *name)
     if (!strstr(name, "ZOnlyChunkVS")) str_cstr(&output, "#define EFFECT_WIND 1\n");
     expand(&output, original, 0);
     free(original);
-    return output.p;
+    return driver_source(output.p);
 }
 
 static int check_source(const char *name, char *source)
 {
+    source = driver_source(source);
     GLuint shader = r_glCreateShader(strstr(name, "VS") ? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER);
     const GLchar *pointer = source;
     r_glShaderSource(shader, 1, &pointer, NULL);
@@ -97,6 +162,9 @@ static int check_non_rtx_history(int lights, int spatial, int temporal, int trac
             valid = 0;
         } else {
             int expected = lights && temporal && enabled;
+#ifdef __APPLE__
+            expected = 0;   // the macOS hook switches local lights and the GI history off (no image load/store)
+#endif
             int history = r_glGetUniformLocation(program, "auGIHist") >= 0;
             int output = r_glGetUniformLocation(program, "auGIOutPos") >= 0;
             if (history != expected || output != expected || r_glGetUniformLocation(program, "auGIOutLight") >= 0) {
@@ -236,6 +304,23 @@ int main(int argumentCount, char **arguments)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
+#ifdef __APPLE__
+    assert(argumentCount == 2);
+    MultiByteToWideChar(CP_UTF8, 0, arguments[1], -1, g_packDir, MAX_PATH);
+    CGLPixelFormatAttribute attributes[] = {kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)kCGLOGLPVersion_GL4_Core,
+                                            kCGLPFAAccelerated, (CGLPixelFormatAttribute)0};
+    CGLPixelFormatObj pixelFormat = NULL;
+    GLint formats = 0;
+    CGLContextObj context = NULL;
+    if (CGLChoosePixelFormat(attributes, &pixelFormat, &formats) || !pixelFormat
+        || CGLCreateContext(pixelFormat, NULL, &context) || CGLSetCurrentContext(context)) {
+        fprintf(stderr, "No OpenGL 4.1 core context\n");
+        return 1;
+    }
+    g_appleGL = dlopen("/System/Library/Frameworks/OpenGL.framework/OpenGL", RTLD_NOW);
+    linux_sdl_getproc = apple_gl_proc;
+    real_wglGetProcAddress = linux_gl_proc;
+#else
     assert(argumentCount == 3);
     MultiByteToWideChar(CP_UTF8, 0, arguments[1], -1, g_packDir, MAX_PATH);
     HMODULE sdl = LoadLibraryA(arguments[2]);
@@ -263,6 +348,7 @@ int main(int argumentCount, char **arguments)
     if (!context) { fprintf(stderr, "%s\n", getError()); return 1; }
     g_real = LoadLibraryW(systemPath);
     real_wglGetProcAddress = (PFN_wglGetProcAddress)GetProcAddress(g_real, "wglGetProcAddress");
+#endif
     #define GET_GL(name) r_##name = (PFN_##name)real_wglGetProcAddress(#name); assert(r_##name)
     GET_GL(glCreateShader);
     GET_GL(glShaderSource);
@@ -506,6 +592,18 @@ int main(int argumentCount, char **arguments)
         char *text = shader_source(programs[program]);
         text = override_number(text, "AU_DLSS", dlss ? "1" : "0");
         failures += !check_source(programs[program], text); tested++;
+    }
+    for (int array = 0; array < 2; array++)
+    for (int alpha = 0; alpha < 2; alpha++) {
+        Str text = {0};
+        str_cstr(&text, "#version 410 core\n");
+        str_cstr(&text, array ? "#define USE_TEXTURE_ARRAY 1\n" : "#define USE_TEXTURE_ARRAY 0\n");
+        str_cstr(&text, alpha ? "#define WRITE_ALPHA 1\n" : "#define WRITE_ALPHA 0\n");
+        char *body = read_file("programs/BasicFS.glsl", NULL);
+        assert(body);
+        expand(&text, body, 0);
+        free(body);
+        failures += !check_source("BasicFS scale-to-window", text.p); tested++;
     }
     for (int blend = 0; blend < 2; blend++) {
         char *text = shader_source("MapChunkFS");

@@ -371,6 +371,33 @@ static void expand(Str *out, const char *text, int depth)
     }
 }
 
+// Apple's compiler rejects #extension after any code, and the pack's additions come before the
+// game's own directives. Moves every #extension line of `text` (outside block comments) to just
+// after its #version line. All of them are ": enable", so lifting them out of #if blocks is safe.
+static void hoist_extensions(char *text, Str *out)
+{
+    char *body = strchr(text, '\n');
+    body = body ? body + 1 : text + strlen(text);
+    str_add(out, text, (size_t)(body - text));
+    int comment = 0;
+    for (char *line = body; *line; ) {
+        char *end = strchr(line, '\n');
+        size_t length = end ? (size_t)(end - line) : strlen(line);
+        if (!comment && !strncmp(line + strspn(line, " \t"), "#extension", 10)) {
+            str_add(out, line, length);
+            str_cstr(out, "\n");
+            memset(line, ' ', length);
+        }
+        for (size_t i = 0; i + 1 < length; i++) {
+            if (!comment && line[i] == '/' && line[i + 1] == '/') break;
+            if (!comment && line[i] == '/' && line[i + 1] == '*') { comment = 1; i++; }
+            else if (comment && line[i] == '*' && line[i + 1] == '/') { comment = 0; i++; }
+        }
+        line = end ? end + 1 : line + length;
+    }
+    str_cstr(out, body);
+}
+
 // Builds the replacement source for runtime source `orig` identified as entry `idx`.
 // Returns NULL when there is no override file.
 static char *build_override(const char *orig, int idx)
@@ -393,27 +420,14 @@ static char *build_override(const char *orig, int idx)
         str_add(&out, orig, n); // just the #version line
     }
     str_cstr(&out, "#define HYTALE_SHADERPACK 1\n");
-#ifdef __APPLE__
-    // Apple's compiler rejects #extension after any code, and the pack's additions come before the
-    // game's own directives. All of them are ": enable", so hoisting them out of #if blocks is safe.
-    Str body = {0};
-    expand(&body, main, 0);
-    for (char *line = body.p; line && *line; ) {
-        char *end = strchr(line, '\n');
-        size_t length = end ? (size_t)(end - line) : strlen(line);
-        if (!strncmp(line + strspn(line, " \t"), "#extension", 10)) {
-            str_add(&out, line, length);
-            str_cstr(&out, "\n");
-            memset(line, ' ', length);
-        }
-        line = end ? end + 1 : NULL;
-    }
-    if (body.n) str_add(&out, body.p, body.n);
-    free(body.p);
-#else
     expand(&out, main, 0);
-#endif
     free(main);
+#ifdef __APPLE__
+    Str hoisted = {0};
+    hoist_extensions(out.p, &hoisted);
+    free(out.p);
+    out = hoisted;
+#endif
     return out.p;
 }
 
@@ -513,8 +527,17 @@ typedef struct {
     GLint locDlssActive, locDlssRR;
     GLint locMaterials;      // uHookMaterials (terrain): per-tile block materials
     GLint locSSSMasks, locSSSReady;
+    GLint locEmissionReady;
+    GLint locUpscale;        // uHookUpscale (BasicFS): set while it scales the finished frame to the window
     int shareGen, shareSrc;  // cached: is this program the source of a texture share
+    int shareLocGen;         // g_shareGen the destination sampler locations below were looked up for
+    GLint shareLoc[16];
+    int kind;                // PK_*: the passes the hook treats specially
+    int temporalGeometry;    // draws scene geometry (jittered, see temporal_geometry)
+    unsigned temporalSent;   // g_temporalGeneration whose uniforms this program already has
 } ProgRec;
+
+enum { PK_OTHER, PK_POST_EFFECT, PK_TAA, PK_BASIC, PK_DEFERRED };
 
 // Uniform block bindings the game uses, by block name. Programs we rewrite may gain
 // blocks (e.g. the scene UBO) that the game never binds for them.
@@ -747,6 +770,7 @@ static void APIENTRY hook_glLinkProgram(GLuint prog)
     }
     p->blkChecked = 0;
     p->extrasChecked = 0;
+    p->shareLocGen = 0;
     LeaveCriticalSection(&g_lock);
 
     r_glLinkProgram(prog);
@@ -963,6 +987,7 @@ static int relink_program(GLuint prog, ProgRec *p, int useOverrides)
     refresh_uniforms(prog, p);
     p->blkChecked = 0;
     p->extrasChecked = 0;
+    p->shareLocGen = 0;
     for (int i = 0; i < p->nblk; i++) {
         GLuint bi = r_glGetUniformBlockIndex(prog, p->blk[i].name);
         if (bi != GL_INVALID_INDEX) r_glUniformBlockBinding(prog, bi, p->blk[i].binding);
@@ -1157,6 +1182,9 @@ static double g_setDlssPreset = 0;  // AU_DLSS_PRESET: 0 NVIDIA's default model,
 static double g_setDlssRRPreset = 0;
 static double g_setDlssSharpness = 0.2;
 static int g_setRenderScale, g_setDlssEnabled;
+static int g_setTAAJitter;          // AU_TAA && AU_TAA_JITTER: jitter for the pack's own TAA
+static double g_setUpscaleSharpness = 0.3;
+static int g_taaFrame = -100;       // last frame TemporalAAFS ran
 static int g_setFrameGen;
 static int g_setVoxelColors;
 static int g_temporalFrame = -1, g_temporalValid;
@@ -1175,6 +1203,10 @@ static void materials_use(ProgRec *p);
 typedef struct { GLint viewport[4], scissor[4]; int active, fragmentLocation; } RenderUIState;
 static RenderUIState render_ui_begin(void);
 static void render_ui_end(RenderUIState state);
+static int g_frame;                    // presented frames (see SDL_GL_SwapWindow / wglSwapBuffers)
+static int g_sceneFrame = -1;          // frame whose PostEffectFS ran (its scene is not on the window yet)
+static GLint upscale_begin(ProgRec *program);
+static void upscale_end(GLint location);
 
 AU_GL_EXPORT void APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count)
 {
@@ -1182,12 +1214,15 @@ AU_GL_EXPORT void APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count)
     if (program) temporal_prepare(program);
     share_draw_capture();
     if (g_matProgRec) materials_draw_check();
+    if (program && program->kind == PK_POST_EFFECT) g_sceneFrame = g_frame;
     if (g_giProg && g_giProg == g_curProg) { gi_draw(mode, first, count); return; }
     if (g_dlssProg && g_dlssProg == g_curProg) { dlss_draw(mode, first, count); return; }
     if (g_dlssPending && dlss_present()) return;
     framegen_before_ui(program);
     RenderUIState ui = render_ui_begin();
+    GLint upscale = upscale_begin(program);
     r_glDrawArrays(mode, first, count);
+    upscale_end(upscale);
     render_ui_end(ui);
     framegen_after_scene(program);
 }
@@ -1201,7 +1236,9 @@ AU_GL_EXPORT void APIENTRY glDrawElements(GLenum mode, GLsizei count, GLenum typ
     if (g_dlssPending && dlss_present()) return;
     framegen_before_ui(program);
     RenderUIState ui = render_ui_begin();
+    GLint upscale = upscale_begin(program);
     r_glDrawElements(mode, count, type, indices);
+    upscale_end(upscale);
     render_ui_end(ui);
     framegen_after_scene(program);
 }
@@ -1232,11 +1269,16 @@ static void APIENTRY hook_glDrawElementsInstanced(GLenum mode, GLsizei count, GL
 
 static void apply_shares(GLuint prog, ProgRec *p)
 {
+    // The destination samplers are looked up once per link and share.txt load, not at every use.
+    if (p->shareLocGen != g_shareGen) {
+        p->shareLocGen = g_shareGen;
+        for (int i = 0; i < g_nShares; i++)
+            p->shareLoc[i] = strcmp(p->pname, g_shares[i].dst) ? -1 : r_glGetUniformLocation(prog, g_shares[i].dstSampler);
+    }
     for (int i = 0; i < g_nShares; i++) {
         Share *s = &g_shares[i];
-        if (!s->valid || strcmp(p->pname, s->dst)) continue;
-        GLint loc = r_glGetUniformLocation(prog, s->dstSampler);
-        if (loc < 0) continue;
+        GLint loc = p->shareLoc[i];
+        if (!s->valid || loc < 0) continue;
         GLuint sampler = s->raw ? get_raw_sampler() : s->sampler;
         r_glActiveTexture(GL_TEXTURE0 + s->unit);
         r_glBindTexture(s->target, s->tex);
@@ -1499,7 +1541,11 @@ static void vox_clear(void)
 #define GI_TEX_RAD 21
 #define GI_TEX_POS 22
 #define GI_TEX_LIGHT 20
+#ifdef __APPLE__
+#define GI_TEX_RAW_RAD (HOOK_UNIT_BASE + 3)   // 17 is one of the units Hytale's macOS build uses
+#else
 #define GI_TEX_RAW_RAD 17
+#endif
 #define GI_TEX_RAW_POS 19
 #define GI_TEX_RAW_LIGHT 31
 static int g_frame;            // counted at PostEffectFS (defined with the uniform forwarding)
@@ -1961,8 +2007,7 @@ static void materials_use(ProgRec *p)
         g_units[SSS_MASK_UNIT].sampler = 0;
         r_glActiveTexture(GL_TEXTURE0 + g_activeUnit);
     }
-    GLint emissionReady = r_glGetUniformLocation(g_curProg, "uHookEmissionReady");
-    if (emissionReady >= 0) r_glUniform1i(emissionReady, g_emissionTexture != 0);
+    if (p->locEmissionReady >= 0) r_glUniform1i(p->locEmissionReady, g_emissionTexture != 0);
     if (g_emissionTexture) {
         r_glActiveTexture(GL_TEXTURE0 + EMISSION_UNIT);
         r_glBindTexture(GL_TEXTURE_2D_ARRAY_, g_emissionTexture);
@@ -2457,6 +2502,27 @@ static void APIENTRY hook_glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLi
 #endif
 }
 
+// Hytale's own Render Scale below 100: its BasicFS draw scales the finished frame into the
+// window. The pack's BasicFS filters that draw (Catmull-Rom and sharpening) while uHookUpscale
+// holds the window size; every other BasicFS draw (sun, moon, UI quads) keeps it at zero.
+static GLint upscale_begin(ProgRec *program)
+{
+    if (!program || program->kind != PK_BASIC || program->locUpscale < 0 || g_sceneFrame != g_frame || g_postPresent) return -1;
+    GLint framebuffer = -1;
+    r_glGetIntegerv(0x8CA6 /*GL_DRAW_FRAMEBUFFER_BINDING*/, &framebuffer);
+    if (framebuffer != 0) return -1;
+    GLint viewport[4] = {0};
+    r_glGetIntegerv(GL_VIEWPORT, viewport);
+    g_sceneFrame = -1;
+    r_glUniform4f(program->locUpscale, (float)viewport[2], (float)viewport[3], (float)g_setUpscaleSharpness, 0.0f);
+    return program->locUpscale;
+}
+
+static void upscale_end(GLint location)
+{
+    if (location >= 0) r_glUniform4f(location, 0.0f, 0.0f, 0.0f, 0.0f);
+}
+
 // Camera jitter for DLSS: a Halton(2,3) sub-pixel offset per frame, added to gl_Position by
 // the pack's vertex shaders (uHookJitter, in NDC). g_jitterPx is what this frame's geometry
 // used (passed to DLSS); the next frame's offset is chosen when PostEffectFS starts.
@@ -2470,21 +2536,33 @@ static float halton(int i, int base)
 
 static void jitter_next_frame(void)
 {
+    int width = 0, height = 0, phases = 8;
 #if AU_HAS_DLSS
     if (g_setDlssJitter != 0 && g_dlssState == 1 && g_dlssProg && g_dlssW > 0 && g_frame - g_dlssPresentedFrame <= 2) {
-            int phases = g_dlssW > 0 && g_dlssH > 0 ? (int)ceilf(8.0f * ((float)g_dlssOW / g_dlssW) * ((float)g_dlssOH / g_dlssH)) : 8;
-            if (phases < 8) phases = 8;
-            if (phases > 128) phases = 128;
-            int i = 1 + g_frame % phases;
-        g_jitterNextPx[0] = halton(i, 2) - 0.5f;
-        g_jitterNextPx[1] = halton(i, 3) - 0.5f;
-        g_jitterNdc[0] = 2.0f * g_jitterNextPx[0] / (float)g_dlssW;
-        g_jitterNdc[1] = 2.0f * g_jitterNextPx[1] / (float)g_dlssH;
-        return;
+        width = g_dlssW;
+        height = g_dlssH;
+        phases = (int)ceilf(8.0f * ((float)g_dlssOW / g_dlssW) * ((float)g_dlssOH / g_dlssH));
     }
 #endif
-    g_jitterNextPx[0] = g_jitterNextPx[1] = 0.0f;
-    g_jitterNdc[0] = g_jitterNdc[1] = 0.0f;
+    // Without an upscaler the pack's TAA (TemporalAAFS, which takes the jitter back out of the
+    // current frame) turns the sub-pixel offsets into anti-aliased edges. Only while it runs.
+    if (!width && g_setTAAJitter && g_enabled && g_frame - g_taaFrame <= 2
+        && g_temporalScene[140] >= 1.0f && g_temporalScene[141] >= 1.0f) {
+        width = (int)g_temporalScene[140];
+        height = (int)g_temporalScene[141];
+    }
+    if (!width || !height) {
+        g_jitterNextPx[0] = g_jitterNextPx[1] = 0.0f;
+        g_jitterNdc[0] = g_jitterNdc[1] = 0.0f;
+        return;
+    }
+    if (phases < 8) phases = 8;
+    if (phases > 128) phases = 128;
+    int i = 1 + g_frame % phases;
+    g_jitterNextPx[0] = halton(i, 2) - 0.5f;
+    g_jitterNextPx[1] = halton(i, 3) - 0.5f;
+    g_jitterNdc[0] = 2.0f * g_jitterNextPx[0] / (float)width;
+    g_jitterNdc[1] = 2.0f * g_jitterNextPx[1] / (float)height;
 }
 
 #include "temporal.h"
@@ -2629,6 +2707,12 @@ static void check_extras(GLuint prog, ProgRec *p)
     if (p->locSSSMasks >= 0) { r_glUniform1i(p->locSSSMasks, SSS_MASK_UNIT); p->hasExtras = 1; }
     p->locMaterialLOD = r_glGetUniformLocation(prog, "uHookTextureLodBias");
     if (p->locMaterialLOD >= 0) p->hasExtras = 1;
+    p->locEmissionReady = r_glGetUniformLocation(prog, "uHookEmissionReady");
+    p->locUpscale = r_glGetUniformLocation(prog, "uHookUpscale");
+    p->temporalGeometry = temporal_geometry(p);
+    p->kind = !strcmp(p->pname, "PostEffectFS") ? PK_POST_EFFECT : !strcmp(p->pname, "TemporalAAFS") ? PK_TAA
+            : !strcmp(p->pname, "BasicFS") ? PK_BASIC : !strcmp(p->pname, "DeferredFS") ? PK_DEFERRED : PK_OTHER;
+    p->temporalSent = 0;
     p->locNativeEmission = r_glGetUniformLocation(prog, "uHookEmission");
     if (p->locNativeEmission >= 0) { r_glUniform1i(p->locNativeEmission, EMISSION_UNIT); p->hasExtras = 1; }
     if (p->locMaterials >= 0) { r_glUniform1i(p->locMaterials, MAT_UNIT); p->hasExtras = 1; }
@@ -2709,7 +2793,7 @@ static void apply_extras(ProgRec *p)
     }
     if (p->locMaterials >= 0 || p->locNativeEmission >= 0) materials_use(p);
     if (p->locJitter >= 0) {
-        if (g_postPresent || !temporal_geometry(p)) r_glUniform2f(p->locJitter, 0.0f, 0.0f);
+        if (g_postPresent || !p->temporalGeometry) r_glUniform2f(p->locJitter, 0.0f, 0.0f);
         else r_glUniform2f(p->locJitter, g_jitterNdc[0], g_jitterNdc[1]);
     }
     if (p->usesGI) g_giProg = g_curProg;
@@ -2846,6 +2930,8 @@ static void settings_load(void)
     g_setDlssRRPreset = settings_num(txt, "AU_DLSS_RR_PRESET", g_setDlssPreset);
     g_setDlssSharpness = fmin(1.0, fmax(0.0, settings_num(txt, "AU_DLSS_SHARPNESS", 0.2)));
     g_setDlssEnabled = settings_num(txt, "AU_DLSS", 0) > 0.5;
+    g_setTAAJitter = settings_num(txt, "AU_TAA", 1) > 0.5 && settings_num(txt, "AU_TAA_JITTER", 0) > 0.5;
+    g_setUpscaleSharpness = fmin(1.0, fmax(0.0, settings_num(txt, "AU_UPSCALE_SHARPNESS", 0.3)));
     int previousFrameGen = g_setFrameGen;
     g_setFrameGen = (int)settings_num(txt, "AU_DLSS_FRAMEGEN", 0);
     if (g_setFrameGen < 0 || g_setFrameGen > 5) g_setFrameGen = 0;
@@ -2889,6 +2975,7 @@ static void do_reload(void)
 {
     g_temporalHavePrevious = 0;
     g_temporalValid = 0;
+    g_temporalGeneration++;
     settings_load();
     materials_reset();
     EnterCriticalSection(&g_lock);
@@ -2959,6 +3046,7 @@ static void APIENTRY hook_glUseProgram(GLuint prog)
         if (g_nShares) apply_shares(prog, p);
         for (int i = 0; i < g_nFwd; i++) if (!strcmp(g_fwd[i].src, p->pname)) g_fwd[i].srcProg = prog;
         if (!strcmp(p->pname, "PostEffectFS")) { update_wetness(); profile_frame_marker(); profile_collect(); }
+        else if (!strcmp(p->pname, "TemporalAAFS")) g_taaFrame = g_frame;
         if (g_nCtex) ensure_textures();
         if (!p->extrasChecked) check_extras(prog, p);
         if (p->hasExtras) apply_extras(p);
@@ -3201,6 +3289,7 @@ static char *find_define_value(char *txt, const char *name, char **tokEnd)
 // options.txt:  "@ Section"  or  "DEFINE | Label | kind | default"
 //   kind = bool | enum value:Label ... (underscores show as spaces) | range min max step
 //   DEFINE "!PACK" is the shaderpack on/off switch (same as the Pause key).
+//   A line starting "?apple " only exists in the macOS build, "?!apple " everywhere else.
 static void menu_load(void)
 {
     g_menuBinding = 0;
@@ -3214,6 +3303,13 @@ static void menu_load(void)
     for (char *line = opt ? strtok_s(opt, "\n", &save) : NULL; line && g_nMo < MENU_MAX; line = strtok_s(NULL, "\n", &save)) {
         line = menu_trim(line);
         if (!*line || *line == '#') continue;
+        int appleOnly = !strncmp(line, "?apple ", 7), appleNever = !strncmp(line, "?!apple ", 8);
+#ifdef __APPLE__
+        if (appleNever) continue;
+#else
+        if (appleOnly) continue;
+#endif
+        if (appleOnly || appleNever) line = menu_trim(line + (appleOnly ? 7 : 8));
         MenuOpt *m = &g_mo[g_nMo];
         memset(m, 0, sizeof(*m));
         if (*line == '@') {
@@ -3417,6 +3513,8 @@ static void display_value(const MenuOpt *m, wchar_t *out, int cap)
     to_wide(out, cap, buf);
 }
 
+static void pack_written(void);
+
 // Writes the menu's values into the settings file, keeping everything else as is.
 static void menu_save(void)
 {
@@ -3463,6 +3561,7 @@ static void menu_save(void)
     }
     if (changed) {
         write_file(MENU_SETTINGS, set, n);
+        pack_written();
         logf_("menu: wrote %d setting(s)", changed);
     }
     menu_hotkey_set(settings_num(set, "AU_MENU_KEY", 36));
@@ -4614,6 +4713,8 @@ static void menu_frame(HDC hdc)
     if (g_ovBits) menu_draw(sw, sh);
     LeaveCriticalSection(&g_menuLock);
 }
+
+static void pack_written(void) {}   // the Windows watcher debounces its own reload
 
 typedef BOOL (WINAPI *PFN_wglSwapBuffers)(HDC);
 static PFN_wglSwapBuffers r_wglSwapBuffers;

@@ -219,13 +219,15 @@ AU_SHARPENING | Sharpening | range 0 10 1 | 2
 AU_TAA | Temporal anti-aliasing | bool | 1
 AU_TAA_BLEND | TAA history weight | range 0.0 0.97 0.01 | 0.93 | Previous-frame TAA weight. Lower values reduce trails but may reveal more edge shimmer and noise.
 AU_TAA_CLIP | TAA history clipping | range 0.5 2.0 0.05 | 1.25 | TAA history-clipping tolerance. Lower values reject mismatched history more aggressively.
-@ NVIDIA DLSS
-AU_DLSS | Super Resolution / DLAA | bool | 0
-AU_RENDER_SCALE | Render resolution (live) | enum 0:Native 100:100%_DLAA 85:85%_Quality++ 77:77%_Quality+ 67:67%_Quality 58:58%_Balanced 50:50%_Performance 33:33%_Ultra_Performance | 0 | Changes the actual scene buffers without resizing the window. Quality+ and Quality++ use custom Aurora render ratios with NVIDIA's Quality mode. Keep Hytale Render Scale at 100 percent; enable DLSS to apply this setting.
-!DLSS_INFO | Active render size | info
-AU_DLSS_SHARPNESS | DLSS sharpness | range 0.0 1.0 0.05 | 0.2 | Edge-limited sharpening after DLSS or Ray Reconstruction. Zero disables this pass. Independent of the pre-upscale Sharpening setting.
-AU_DLSS_PRESET | Super Resolution model | enum 0:NVIDIA_default 1:K_(sharpest) 2:J_(less_ghosting) | 0 | Selects the Super Resolution model. NVIDIA default lets the runtime choose.
-!DLSS_DENOISER_INFO | Lighting denoiser | info | 0 | Select Original or NVIDIA DLSS Ray Reconstruction in the GI denoising tab. NVIDIA requires DLSS enabled; 100 percent resolution uses DLAA with Ray Reconstruction.
-AU_DLSS_RR_PRESET | Ray Reconstruction model | enum 0:NVIDIA_default 1:E_(sharpest) 2:D_(less_ghosting) | 0 | Selects the Ray Reconstruction model independently of the Super Resolution model.
-AU_DLSS_FRAMEGEN | DLSS Frame Generation | enum 0:Off 1:2x 2:3x 3:4x 5:6x | 0 | NVIDIA DLSS-G with Reflex and a Vulkan presentation bridge. Multiplier is limited to GPU support. Works independently of Super Resolution. Moving models currently rely on optical flow rather than object motion vectors.
-!DLSS_FG_INFO | Frame Generation status | info
+AU_TAA_JITTER | Sub-pixel jitter | bool | 0 | Shifts the camera by a fraction of a pixel every frame so the TAA resolves edges as well as noise (no upscaler needed). Turn off if edges shimmer.
+AU_UPSCALE_SHARPNESS | Upscale sharpness | range 0.0 1.0 0.05 | 0.3 | Used while Hytale's Render Scale is below 100 percent: the frame is scaled into the window with a bicubic filter and this much sharpening.
+?!apple @ NVIDIA DLSS
+?!apple AU_DLSS | Super Resolution / DLAA | bool | 0
+?!apple AU_RENDER_SCALE | Render resolution (live) | enum 0:Native 100:100%_DLAA 85:85%_Quality++ 77:77%_Quality+ 67:67%_Quality 58:58%_Balanced 50:50%_Performance 33:33%_Ultra_Performance | 0 | Changes the actual scene buffers without resizing the window. Quality+ and Quality++ use custom Aurora render ratios with NVIDIA's Quality mode. Keep Hytale Render Scale at 100 percent; enable DLSS to apply this setting.
+?!apple !DLSS_INFO | Active render size | info
+?!apple AU_DLSS_SHARPNESS | DLSS sharpness | range 0.0 1.0 0.05 | 0.2 | Edge-limited sharpening after DLSS or Ray Reconstruction. Zero disables this pass. Independent of the pre-upscale Sharpening setting.
+?!apple AU_DLSS_PRESET | Super Resolution model | enum 0:NVIDIA_default 1:K_(sharpest) 2:J_(less_ghosting) | 0 | Selects the Super Resolution model. NVIDIA default lets the runtime choose.
+?!apple !DLSS_DENOISER_INFO | Lighting denoiser | info | 0 | Select Original or NVIDIA DLSS Ray Reconstruction in the GI denoising tab. NVIDIA requires DLSS enabled; 100 percent resolution uses DLAA with Ray Reconstruction.
+?!apple AU_DLSS_RR_PRESET | Ray Reconstruction model | enum 0:NVIDIA_default 1:E_(sharpest) 2:D_(less_ghosting) | 0 | Selects the Ray Reconstruction model independently of the Super Resolution model.
+?!apple AU_DLSS_FRAMEGEN | DLSS Frame Generation | enum 0:Off 1:2x 2:3x 3:4x 5:6x | 0 | NVIDIA DLSS-G with Reflex and a Vulkan presentation bridge. Multiplier is limited to GPU support. Works independently of Super Resolution. Moving models currently rely on optical flow rather than object motion vectors.
+?!apple !DLSS_FG_INFO | Frame Generation status | info

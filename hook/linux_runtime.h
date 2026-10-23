@@ -71,6 +71,12 @@ static PROC linux_gl_proc(const char *name)
 #define LINUX_SDL_ORIGINAL "/libSDL3.aurora-original.so"
 #endif
 
+#ifdef __APPLE__
+static uint64_t mac_pack_stamp(void);
+static void *mac_watch_thread(void *unused);
+static uint64_t mac_stamp;
+#endif
+
 static void linux_init(void)
 {
 #if AU_SDL_PROXY
@@ -136,7 +142,12 @@ static void linux_init(void)
     r_glBindTexture = (PFN_glBindTexture)linux_gl_proc("glBindTexture");
     r_glDrawArrays = (PFN_glDrawArrays)linux_gl_proc("glDrawArrays");
     r_glDrawElements = (PFN_glDrawElements)linux_gl_proc("glDrawElements");
-#ifndef __APPLE__
+#ifdef __APPLE__
+    mac_stamp = mac_pack_stamp();
+    pthread_t watcher;
+    if (pthread_create(&watcher, NULL, mac_watch_thread, NULL) == 0) pthread_detach(watcher);
+    else logf_("cannot watch the shader pack for edits");
+#else
     linux_notify = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     if (linux_notify >= 0) {
         const char *dirs[] = {"programs", "include"};
@@ -181,7 +192,40 @@ static uint64_t mac_pack_stamp(void)
     }
     return stamp;
 }
+
+// Polled off the render thread: the readdir/stat pass took frame time when SDL_GL_SwapWindow ran it.
+static pthread_mutex_t mac_stamp_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t mac_stamp;
+static volatile LONG mac_pack_changed;
+
+static void *mac_watch_thread(void *unused)
+{
+    (void)unused;
+    for (;;) {
+        usleep(500000);
+        pthread_mutex_lock(&mac_stamp_lock);
+        uint64_t current = mac_pack_stamp();
+        if (current != mac_stamp) { mac_stamp = current; InterlockedExchange(&mac_pack_changed, 1); }
+        pthread_mutex_unlock(&mac_stamp_lock);
+    }
+    return NULL;
+}
 #endif
+
+// The hook wrote the pack itself (menu_save): it reloads through g_reloadRequested, so the file
+// watcher must not see that write as an edit and reload a second time.
+static void pack_written(void)
+{
+#ifdef __APPLE__
+    pthread_mutex_lock(&mac_stamp_lock);
+    mac_stamp = mac_pack_stamp();
+    InterlockedExchange(&mac_pack_changed, 0);
+    pthread_mutex_unlock(&mac_stamp_lock);
+#else
+    char events[4096];
+    if (linux_notify >= 0) while (read(linux_notify, events, sizeof events) > 0) {}
+#endif
+}
 
 static void linux_input(void *window)
 {
@@ -190,14 +234,7 @@ static void linux_input(void *window)
     static double next[9];
     double t = now_sec();
 #ifdef __APPLE__
-    static double pollAt;
-    static uint64_t stamp;
-    if (t >= pollAt) {
-        uint64_t current = mac_pack_stamp();
-        if (pollAt && current != stamp) linux_reload_at = t + 0.4;
-        stamp = current;
-        pollAt = t + 0.5;
-    }
+    if (mac_pack_changed && InterlockedExchange(&mac_pack_changed, 0)) linux_reload_at = t + 0.4;
 #else
     if (linux_notify >= 0) {
         char events[4096];

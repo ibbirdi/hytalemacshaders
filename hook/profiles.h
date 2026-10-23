@@ -137,6 +137,21 @@ static void menu_profile_builtin(int selected)
     menu_profile_set("AU_AO_METHOD", tier >= 3);
     menu_profile_set("AU_GTAO_QUALITY", tier >= 5 ? 3 : tier == 4 ? 2 : 1);
     menu_profile_set("AU_CLOUD_LIGHTING", tier >= 4);
+#ifdef __APPLE__
+    // Apple Silicon at Retina sizes: MetalFX renders the RTX profiles at two thirds of the window
+    // (Ray Reconstruction's counterpart, the denoised scaler, from High), the TAA jitters, the
+    // screen-space GI and light shafts run at half resolution, and the per-pixel sample counts the
+    // temporal filters integrate anyway stay moderate.
+    menu_profile_set("AU_TAA_JITTER", 1);
+    menu_profile_set("AU_HALF_RES_FX", 1);
+    menu_profile_set("AU_METALFX", rtx);
+    menu_profile_set("AU_METALFX_DENOISER", rtx && tier >= 3);
+    menu_profile_set("AU_RENDER_SCALE", rtx ? 67 : 100);
+    menu_profile_set("AU_RTX_GI_RAYS", quality[tier].giRays < 4 ? quality[tier].giRays : 4);
+    menu_profile_set("AU_LIGHTSHAFT_SAMPLES", quality[tier].shaftSamples < 16 ? quality[tier].shaftSamples : 16);
+    menu_profile_set("AU_SHADOW_SAMPLES", quality[tier].shadowSamples < 16 ? quality[tier].shadowSamples : 16);
+    menu_profile_set("AU_FAR_SHADOW_STEPS", quality[tier].farSteps < 24 ? quality[tier].farSteps : 24);
+#endif
 }
 
 static void menu_profile_apply(void)
@@ -184,7 +199,9 @@ static void menu_profile_apply(void)
 #if !AU_HAS_DLSS
     menu_profile_set("AU_DLSS", 0);
     menu_profile_set("AU_GI_DENOISER", 1);
-    menu_profile_set("AU_RENDER_SCALE", 100);
+#ifndef __APPLE__
+    menu_profile_set("AU_RENDER_SCALE", 100);   // MetalFX uses it on macOS
+#endif
 #endif
     g_toggleOff = 0;
     g_menuWriteAt = 0;

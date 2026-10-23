@@ -12,6 +12,7 @@ static int g_temporalHavePrevious;
 static float g_previousSceneJitter[2];
 static ULONGLONG g_temporalTick;
 static int g_temporalLogCount;
+static unsigned g_temporalGeneration = 1;   // changes whenever the temporal uniforms' values do
 typedef void (APIENTRY *TemporalBufferData)(GLenum, ptrdiff_t, const void *, GLenum);
 typedef void (APIENTRY *TemporalBufferSubData)(GLenum, ptrdiff_t, ptrdiff_t, const void *);
 typedef TemporalBufferData PFN_glBufferData;
@@ -124,6 +125,10 @@ static int temporal_geometry(const ProgRec *program)
 
 static void temporal_uniforms(ProgRec *program)
 {
+    // Uniforms keep their values per program: send them once per change, not at every draw.
+    unsigned sent = g_temporalGeneration * 2u + (g_postPresent != 0);
+    if (program->temporalSent == sent) return;
+    program->temporalSent = sent;
     if (program->giCompact) {
         if (program->locGIPreviousInverse >= 0) r_glUniformMatrix4fv(program->locGIPreviousInverse, 1, 0, g_previousInverseProjection);
         if (program->locGIPreviousDepth >= 0) r_glUniform2f(program->locGIPreviousDepth, g_temporalPreviousScene[58], g_temporalPreviousScene[62]);
@@ -136,24 +141,31 @@ static void temporal_uniforms(ProgRec *program)
     if (program->locGeometryJitter >= 0) r_glUniform2f(program->locGeometryJitter, g_jitterNdc[0], g_jitterNdc[1]);
     if (program->locPreviousGeometryJitter >= 0) r_glUniform2f(program->locPreviousGeometryJitter, g_previousGeometryJitter[0], g_previousGeometryJitter[1]);
     if (program->locHistoryValid >= 0) r_glUniform1i(program->locHistoryValid, g_temporalValid);
-    if (program->locJitter >= 0)
-        r_glUniform2f(program->locJitter, temporal_geometry(program) && !g_postPresent ? g_jitterNdc[0] : 0.0f,
-                                      temporal_geometry(program) && !g_postPresent ? g_jitterNdc[1] : 0.0f);
+    if (program->locJitter >= 0) {
+        int jittered = program->temporalGeometry && !g_postPresent;
+        r_glUniform2f(program->locJitter, jittered ? g_jitterNdc[0] : 0.0f, jittered ? g_jitterNdc[1] : 0.0f);
+    }
 }
 
 static void temporal_prepare(ProgRec *program)
 {
     if (!program->extrasChecked) return;
-    if (g_temporalFrame != g_frame && (temporal_geometry(program) || !strcmp(program->pname, "DeferredFS"))) {
+    if (g_temporalFrame != g_frame && (program->temporalGeometry || !strcmp(program->pname, "DeferredFS"))) {
         GLuint block = r_glGetUniformBlockIndex(g_curProg, "uboSceneDataBlock");
         typedef void (APIENTRY *GetBlockInteger)(GLuint, GLuint, GLenum, GLint *);
         typedef void (APIENTRY *GetIndexedInteger)(GLenum, GLuint, GLint *);
         typedef void (APIENTRY *GetBufferBytes)(GLenum, ptrdiff_t, ptrdiff_t, void *);
         typedef void (APIENTRY *BindBuffer)(GLenum, GLuint);
-        GetBlockInteger getBlock = (GetBlockInteger)real_wglGetProcAddress("glGetActiveUniformBlockiv");
-        GetIndexedInteger getIndexed = (GetIndexedInteger)real_wglGetProcAddress("glGetIntegeri_v");
-        GetBufferBytes getBytes = (GetBufferBytes)real_wglGetProcAddress("glGetBufferSubData");
-        BindBuffer bind = (BindBuffer)real_wglGetProcAddress("glBindBuffer");
+        static GetBlockInteger getBlock;
+        static GetIndexedInteger getIndexed;
+        static GetBufferBytes getBytes;
+        static BindBuffer bind;
+        if (!getBlock) {
+            getBlock = (GetBlockInteger)real_wglGetProcAddress("glGetActiveUniformBlockiv");
+            getIndexed = (GetIndexedInteger)real_wglGetProcAddress("glGetIntegeri_v");
+            getBytes = (GetBufferBytes)real_wglGetProcAddress("glGetBufferSubData");
+            bind = (BindBuffer)real_wglGetProcAddress("glBindBuffer");
+        }
         if (block == GL_INVALID_INDEX || !getBlock || !getIndexed || !getBytes || !bind) return;
         GLint binding = 0, buffer = 0;
         getBlock(g_curProg, block, 0x8a3f, &binding);
@@ -209,6 +221,7 @@ static void temporal_prepare(ProgRec *program)
 #endif
         g_temporalHavePrevious = 1;
         g_temporalFrame = g_frame;
+        g_temporalGeneration++;
         g_temporalTick = tick;
         if (g_temporalLogCount++ < 3) logf_("AA scene: %s cached=%d size=%.0fx%.0f jitter=(%.7f, %.7f) history=%d", program->pname,
                                           cached, scene[140], scene[141], g_sceneJitter[0], g_sceneJitter[1], g_temporalValid);

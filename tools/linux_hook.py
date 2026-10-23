@@ -102,9 +102,18 @@ def atomic_copy(source, target):
         pending.unlink(missing_ok=True)
 
 
-def merge_settings(defaults, previous, dlss_supported=False):
+# Apple Silicon starting point (hook/profiles.h, macOS block): MetalFX at two thirds of the window,
+# TAA jitter, half-resolution GI and light shafts, moderate sample counts. Applied once, to settings
+# from before these options existed, so later choices are kept.
+MAC_DEFAULTS = {"AU_TAA_JITTER": "1", "AU_HALF_RES_FX": "1", "AU_METALFX": "1", "AU_RENDER_SCALE": "67",
+                "AU_RTX_GI_RAYS": "4", "AU_LIGHTSHAFT_SAMPLES": "16", "AU_SHADOW_SAMPLES": "16", "AU_FAR_SHADOW_STEPS": "24"}
+
+
+def merge_settings(defaults, previous, dlss_supported=False, mac=MAC):
     scalar = r"(?m)^(#define\s+(AU_\w+)\s+)([-+]?\d+(?:\.\d+)?)(?=\s|$)"
     values = {match[1]: match[2] for match in re.findall(scalar, previous)}
+    if mac and "AU_TAA_JITTER" not in values:
+        values.update(MAC_DEFAULTS)
     # Older Linux installers zeroed every DLSS option, including motion/jitter
     # multipliers. Detect that signature without overwriting individual user edits.
     legacy_motion = ("AU_DLSS_JITTER", "AU_DLSS_JITTER_SX", "AU_DLSS_JITTER_SY",
@@ -118,7 +127,7 @@ def merge_settings(defaults, previous, dlss_supported=False):
             value = match[3]
         # Disable the backend, not its tuning values: they must survive a later
         # driver repair or an upgrade to a DLSS-capable installation.
-        if not dlss_supported and name in ("AU_DLSS", "AU_RENDER_SCALE"):
+        if not dlss_supported and (name == "AU_DLSS" or (name == "AU_RENDER_SCALE" and not mac)):
             value = "0"
         if name == "AU_DLSS_FRAMEGEN":
             value = "0"
