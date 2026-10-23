@@ -256,6 +256,7 @@ static void linux_input(void *window)
     int count = 0;
     const bool *state = linux_sdl_keys(&count);
     bool focus = linux_sdl_focus() == window;
+    g_gameFocused = focus;
     if (g_menuBinding) {
         unsigned char pressed[256] = {0};
         for (int key = 8; state && key < 256; key++) {

@@ -3553,6 +3553,20 @@ static GLuint g_profQ[PROF_MAX];
 static char g_profName[PROF_MAX][48];
 static LARGE_INTEGER g_fpsT0;
 static int g_fpsFrames;
+static int g_gameFocused = 1;   // the game's window has the keyboard (games run slower in the background)
+
+#ifdef __APPLE__
+// Apple's OpenGL answers GL_TIMESTAMP queries with 0: the profile times each pass with
+// GL_TIME_ELAPSED queries instead, one after the other.
+#define PROFILE_ELAPSED 1
+#define GL_TIME_ELAPSED_ 0x88BF
+typedef void (APIENTRY *PFN_glBeginQuery)(GLenum, GLuint);
+typedef void (APIENTRY *PFN_glEndQuery)(GLenum);
+static PFN_glBeginQuery g_beginQuery;
+static PFN_glEndQuery g_endQuery;
+#else
+#define PROFILE_ELAPSED 0
+#endif
 
 static void profile_frame_marker(void)
 {
@@ -3563,13 +3577,25 @@ static void profile_frame_marker(void)
     g_fpsFrames++;
     double secs = (double)(now.QuadPart - g_fpsT0.QuadPart) / (double)g_freq.QuadPart;
     if (secs >= 10.0) {
+        double frameMs = secs * 1000.0 / g_fpsFrames;
 #if AU_HAS_METALFX
         // Where a slowdown comes from: the GPU work MetalFX waits for, the Mac's heat, memory growth.
-        logf_("fps %.1f (%.2f ms), MetalFX wait %.2f ms, thermal state %d, memory %d MB", g_fpsFrames / secs,
-              secs * 1000.0 / g_fpsFrames, amf_take_wait_ms(), amf_thermal_state(), amf_memory_mb());
+        logf_("fps %.1f (%.2f ms), MetalFX wait %.2f ms, thermal state %d, memory %d MB%s", g_fpsFrames / secs,
+              frameMs, amf_take_wait_ms(), amf_thermal_state(), amf_memory_mb(), g_gameFocused ? "" : ", in the background");
 #else
-        logf_("fps %.1f (%.2f ms)", g_fpsFrames / secs, secs * 1000.0 / g_fpsFrames);
+        logf_("fps %.1f (%.2f ms)%s", g_fpsFrames / secs, frameMs, g_gameFocused ? "" : ", in the background");
 #endif
+        // A frame profile when frames get much slower than in the last 10 s, and one a minute, while
+        // the game is in front: what changed shows in hook.log without anyone asking for it.
+        static double previousMs;
+        static int windows;
+        if (g_gameFocused && g_profState == 0) {
+            if (previousMs > 0.0 && frameMs > previousMs * 1.35 && frameMs > 18.0) {
+                logf_("slowdown: %.1f ms a frame, was %.1f: profiling a frame", frameMs, previousMs);
+                g_profState = 1;
+            } else if (++windows % 6 == 0) g_profState = 1;
+        }
+        previousMs = g_gameFocused ? frameMs : 0.0;
         g_fpsFrames = 0;
         g_fpsT0 = now;
     }
@@ -3581,6 +3607,9 @@ static void profile_frame_marker(void)
         g_profState = 2;
         g_profN = 0;
     } else if (g_profState == 2) {
+#if PROFILE_ELAPSED
+        if (g_profN > 0) g_endQuery(GL_TIME_ELAPSED_);
+#endif
         g_profState = 3;
         g_profWait = 0;
     }
@@ -3589,12 +3618,23 @@ static void profile_frame_marker(void)
 static void profile_use(const char *name)
 {
     static PFN_glQueryCounter qc;
+#if PROFILE_ELAPSED
+    if (!g_beginQuery) {
+        g_beginQuery = (PFN_glBeginQuery)real_wglGetProcAddress("glBeginQuery");
+        g_endQuery = (PFN_glEndQuery)real_wglGetProcAddress("glEndQuery");
+    }
+    if (g_profState == 2 && g_profN < PROF_MAX && g_beginQuery && g_endQuery) {
+        if (g_profN > 0) g_endQuery(GL_TIME_ELAPSED_);
+        g_beginQuery(GL_TIME_ELAPSED_, g_profQ[g_profN]);
+#else
     if (!qc) qc = (PFN_glQueryCounter)real_wglGetProcAddress("glQueryCounter");
     if (g_profState == 2 && g_profN < PROF_MAX && qc) {
         qc(g_profQ[g_profN], GL_TIMESTAMP);
+#endif
         snprintf(g_profName[g_profN], 48, "%.47s", name && name[0] ? name : "(other)");
         g_profN++;
     }
+    (void)qc;
 }
 
 static void profile_collect(void)
@@ -3611,15 +3651,16 @@ static void profile_collect(void)
     int counts[128];
     int nn = 0;
     double total = 0.0;
-    for (int i = 0; i + 1 < g_profN; i++) {
-        double d = (double)(t[i + 1] - t[i]) / 1.0e6;
+    // Timestamps: the time between one pass's start and the next; elapsed queries: each pass's time.
+    for (int i = 0; i + 1 < g_profN + PROFILE_ELAPSED; i++) {
+        double d = PROFILE_ELAPSED ? (double)t[i] / 1.0e6 : (double)(t[i + 1] - t[i]) / 1.0e6;
         total += d;
         int k = 0;
         while (k < nn && strcmp(names[k], g_profName[i])) k++;
         if (k == nn && nn < 128) { snprintf(names[nn], 48, "%.47s", g_profName[i]); ms[nn] = 0; counts[nn] = 0; nn++; }
         if (k < 128) { ms[k] += d; counts[k]++; }
     }
-    logf_("PROFILE frame GPU %.2f ms over %d passes:", total, g_profN - 1);
+    logf_("PROFILE frame GPU %.2f ms over %d passes:", total, g_profN - 1 + PROFILE_ELAPSED);
     for (int pass = 0; pass < nn; pass++) {
         int best = -1;
         for (int k = 0; k < nn; k++) if (counts[k] >= 0 && (best < 0 || ms[k] > ms[best])) best = k;
