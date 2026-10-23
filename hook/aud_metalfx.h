@@ -50,11 +50,15 @@ int amf_evaluate(float jitterX, float jitterY, float motionScaleX, float motionS
 void amf_set_camera(const float *worldToView, const float *viewToClip);
 
 // Diagnostics for hook.log: the mean time amf_evaluate waited on the GPU since the last call (ms),
-// the Mac's thermal state (0 nominal, 1 fair, 2 serious, 3 critical: the system slows the GPU) and
+// the Mac's thermal state (0 nominal, 1 fair, 2 serious, 3 critical: the system slows the GPU),
 // the game's memory footprint (MB).
 double amf_take_wait_ms(void);
 int amf_thermal_state(void);
 int amf_memory_mb(void);
+
+// Memory the whole system decompressed per second since the last call (MB/s): high when macOS is
+// short of memory and keeps compressing and restoring pages, which stalls the game and the GPU.
+int amf_decompressed_mb_per_s(void);
 
 void amf_shutdown(void);
 

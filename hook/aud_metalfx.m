@@ -403,6 +403,20 @@ int amf_memory_mb(void)
     return (int)(info.phys_footprint / (1024 * 1024));
 }
 
+int amf_decompressed_mb_per_s(void)
+{
+    static uint64_t lastPages, lastNs;
+    vm_statistics64_data_t info;
+    mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&info, &count) != KERN_SUCCESS) return -1;
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    int rate = lastNs ? (int)((double)(info.decompressions - lastPages) * vm_kernel_page_size / (1024.0 * 1024.0)
+                              / ((now - lastNs) / 1e9)) : 0;
+    lastPages = info.decompressions;
+    lastNs = now;
+    return rate;
+}
+
 void amf_shutdown(void)
 {
     @autoreleasepool { amf_release(); }

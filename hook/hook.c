@@ -3579,9 +3579,18 @@ static void profile_frame_marker(void)
     if (secs >= 10.0) {
         double frameMs = secs * 1000.0 / g_fpsFrames;
 #if AU_HAS_METALFX
-        // Where a slowdown comes from: the GPU work MetalFX waits for, the Mac's heat, memory growth.
-        logf_("fps %.1f (%.2f ms), MetalFX wait %.2f ms, thermal state %d, memory %d MB%s", g_fpsFrames / secs,
-              frameMs, amf_take_wait_ms(), amf_thermal_state(), amf_memory_mb(), g_gameFocused ? "" : ", in the background");
+        // Where a slowdown comes from: the GPU work MetalFX waits for, the Mac's heat, memory growth
+        // and the system running short of memory.
+        int decompressed = amf_decompressed_mb_per_s();
+        logf_("fps %.1f (%.2f ms), MetalFX wait %.2f ms, thermal state %d, memory %d MB, system decompressing %d MB/s%s",
+              g_fpsFrames / secs, frameMs, amf_take_wait_ms(), amf_thermal_state(), amf_memory_mb(), decompressed,
+              g_gameFocused ? "" : ", in the background");
+        static int memoryWarned;
+        if (decompressed > 100 && !memoryWarned) {
+            memoryWarned = 1;
+            logf_("the Mac is short of memory (pages restored at %d MB/s): frames stall while it does; a shorter "
+                  "view distance in Hytale's settings and closing other apps free memory", decompressed);
+        }
 #else
         logf_("fps %.1f (%.2f ms)%s", g_fpsFrames / secs, frameMs, g_gameFocused ? "" : ", in the background");
 #endif
