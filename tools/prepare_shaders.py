@@ -62,6 +62,10 @@ def extract(executable):
     if not mains:
         raise ValueError(f"No shader resources found in {executable}")
     version = b"#version 410 core"
+    if version not in data and b"#version 330" in data:
+        # Builds from before Hytale 0.7 (GLSL 330): the pack's edits target 0.7's shaders.
+        raise ValueError("This Hytale build is older than the pack supports (0.7 or later). "
+                         "Open the Hytale launcher, let it update the game, start it once, then install again")
     first = min(offset for offset, _ in mains)
     bases = (p - first for p in occurrences(data, version) if p >= first)
     base = max(bases, key=lambda b: sum(data.startswith(version, b + o) for o, _ in mains), default=-1)

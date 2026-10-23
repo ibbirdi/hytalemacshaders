@@ -45,7 +45,11 @@ fi
 
 step "Installation dans Hytale (compilation et préparation des shaders, une à deux minutes)"
 cd "$CHECKOUT"
-./install.sh "$@"
+if ! ./install.sh "$@"; then
+    fail "l'installation n'a pas abouti (message ci-dessus).
+Le plus souvent, Hytale n'est pas à jour : ouvre le lanceur Hytale, laisse-le mettre le jeu à jour,
+lance une partie une fois, ferme le jeu, puis relance cette commande."
+fi
 
 step "Terminé"
 if [[ " $* " == *" --uninstall "* ]]; then
